@@ -13,6 +13,8 @@ Phase 1 implements the detection pipeline:
 
 Heavy applications are detected by matching linked libraries against
 [`analyzer/config/heavy_libs.conf`](./analyzer/config/heavy_libs.conf).
+The scan ignores debug payloads and shared-library artifacts so it focuses on
+launchable executables.
 
 ## Key Entrypoints
 

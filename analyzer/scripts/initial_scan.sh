@@ -39,12 +39,20 @@ trap 'rm -f "${tmp_list}"' EXIT
 
 : > "${tmp_list}"
 
-while IFS= read -r package_name; do
+mapfile -t packages < <(pacman -Qq)
+total_packages=${#packages[@]}
+processed_packages=0
+
+echo "Starting initial scan for ${total_packages} installed packages..."
+
+for package_name in "${packages[@]}"; do
     [[ -n "${package_name}" ]] || continue
-    "${SCRIPT_DIR}/analyze_package.sh" "${package_name}" >> "${tmp_list}" || true
-done < <(pacman -Qq)
+    processed_packages=$((processed_packages + 1))
+    AUTOGPUSWITCHER_PROGRESS_PREFIX="[${processed_packages}/${total_packages}] " \
+        "${SCRIPT_DIR}/analyze_package.sh" "${package_name}" >> "${tmp_list}" || true
+done
 
 grep -vE '^\s*($|#)' "${tmp_list}" | LC_ALL=C sort -u > "${HEAVY_LIST_FILE}"
 mark_first_run_complete
 
-echo "Initial scan complete. Recorded $(wc -l < "${HEAVY_LIST_FILE}") heavy apps."
+echo "Initial scan complete. Recorded $(count_lines "${HEAVY_LIST_FILE}") heavy apps."

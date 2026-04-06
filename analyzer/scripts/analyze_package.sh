@@ -19,6 +19,7 @@ EOF
 ensure_state_dirs
 
 record_matches=0
+progress_prefix="${AUTOGPUSWITCHER_PROGRESS_PREFIX:-}"
 
 if [[ "${1:-}" == "--help" ]]; then
     usage
@@ -37,6 +38,10 @@ fi
 
 for package_name in "$@"; do
     pacman -Q "${package_name}" >/dev/null 2>&1 || continue
+
+    if [[ -n "${progress_prefix}" ]]; then
+        printf '%s%s\n' "${progress_prefix}" "${package_name}" >&2
+    fi
 
     mapfile -t binaries < <(
         pacman -Qlq "${package_name}" 2>/dev/null | while IFS= read -r path; do

@@ -27,10 +27,39 @@ normalize_app_name() {
 
 is_elf_executable() {
     local path="${1:-}"
+    local file_output
 
     [[ -f "${path}" && -x "${path}" ]] || return 1
+    should_scan_path "${path}" || return 1
 
-    file -Lb "${path}" 2>/dev/null | grep -q 'ELF'
+    file_output=$(file -Lb "${path}" 2>/dev/null || true)
+    [[ -n "${file_output}" ]] || return 1
+
+    grep -Eq 'ELF .* (executable|pie executable),' <<< "${file_output}"
+}
+
+should_scan_path() {
+    local path="${1:-}"
+
+    [[ -n "${path}" ]] || return 1
+    [[ "${path}" != /usr/lib/debug/* ]] || return 1
+    [[ "${path}" != *.debug ]] || return 1
+    [[ "${path}" != *.so ]] || return 1
+    [[ "${path}" != *.so.* ]] || return 1
+    [[ "${path}" != /usr/include/* ]] || return 1
+    [[ "${path}" != /usr/share/* ]] || return 1
+
+    return 0
+}
+
+count_lines() {
+    local path="${1:-}"
+
+    if [[ -f "${path}" ]]; then
+        wc -l < "${path}"
+    else
+        echo 0
+    fi
 }
 
 mark_first_run_complete() {
