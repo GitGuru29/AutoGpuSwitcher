@@ -30,12 +30,12 @@ cat "${HEAVY_LIST_FILE}" > "${tmp_file}"
 
 if [[ $# -gt 0 ]]; then
     for item in "$@"; do
-        normalize_app_name "${item}" >> "${tmp_file}"
+        normalize_heavy_app_record "${item}" >> "${tmp_file}"
     done
 else
     while IFS= read -r line; do
         [[ -n "${line}" ]] || continue
-        normalize_app_name "${line}" >> "${tmp_file}"
+        normalize_heavy_app_record "${line}" >> "${tmp_file}"
     done
 fi
 

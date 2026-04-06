@@ -19,6 +19,7 @@ EOF
 ensure_state_dirs
 
 record_matches=0
+package_name="${AUTOGPUSWITCHER_PACKAGE_NAME:-unknown}"
 
 if [[ "${1:-}" == "--help" ]]; then
     usage
@@ -62,8 +63,10 @@ for binary_path in "$@"; do
 
     if binary_uses_heavy_libs "${binary_path}"; then
         app_name=$(normalize_app_name "${binary_path}")
-        printf '%s\n' "${app_name}"
-        matches+=("${app_name}")
+        record=$(format_heavy_app_record "${package_name}" "${app_name}" "${binary_path}")
+        printf '%s\n' "${record}"
+        matches+=("${record}")
+        verbose_log "heavy app detected: ${record}"
     fi
 done
 

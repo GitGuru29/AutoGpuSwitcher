@@ -5,12 +5,13 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 INITIAL_SCAN_SCRIPT="${PROJECT_ROOT}/analyzer/scripts/initial_scan.sh"
-FIRST_RUN_MARKER="${PROJECT_ROOT}/state/first_run_complete"
+# shellcheck source=../analyzer/scripts/common.sh
+source "${PROJECT_ROOT}/analyzer/scripts/common.sh"
 
 usage() {
     cat <<'EOF'
 Usage:
-  first_run.sh [--yes] [--force]
+  first_run.sh [--yes] [--force] [--verbose]
 
 Prompts for the initial installed-app scan unless it has already completed.
 EOF
@@ -18,6 +19,7 @@ EOF
 
 auto_yes=0
 force_scan=0
+verbose_flag=0
 
 for arg in "$@"; do
     case "${arg}" in
@@ -26,6 +28,10 @@ for arg in "$@"; do
             ;;
         --force)
             force_scan=1
+            ;;
+        --verbose)
+            verbose_flag=1
+            export AUTOGPUSWITCHER_VERBOSE=1
             ;;
         --help)
             usage
@@ -58,7 +64,13 @@ if (( ! auto_yes )); then
 fi
 
 if (( force_scan )); then
+    if (( verbose_flag )); then
+        exec "${INITIAL_SCAN_SCRIPT}" --force --verbose
+    fi
     exec "${INITIAL_SCAN_SCRIPT}" --force
 else
+    if (( verbose_flag )); then
+        exec "${INITIAL_SCAN_SCRIPT}" --verbose
+    fi
     exec "${INITIAL_SCAN_SCRIPT}"
 fi

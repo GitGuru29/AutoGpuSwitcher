@@ -8,4 +8,4 @@ Target = *
 Description = Queue AutoGpuSwitcher analysis for newly installed packages
 When = PostTransaction
 NeedsTargets
-Exec = /usr/bin/env bash /usr/lib/autogpuswitcher/hooks/post_transaction.sh
+Exec = /usr/bin/env bash /usr/lib/autogpuswitcher/pacman-hook/post_transaction.sh

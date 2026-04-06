@@ -4,10 +4,12 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+# shellcheck source=../analyzer/scripts/common.sh
+source "${PROJECT_ROOT}/analyzer/scripts/common.sh"
 ANALYZE_PACKAGE_SCRIPT="${PROJECT_ROOT}/analyzer/scripts/analyze_package.sh"
-LOG_FILE="${PROJECT_ROOT}/state/logs/pacman-hook.log"
+LOG_FILE="${LOG_DIR}/pacman-hook.log"
 
-mkdir -p "${PROJECT_ROOT}/state/logs"
+ensure_state_dirs
 
 mapfile -t package_names
 

@@ -1,3 +1,5 @@
+state/heavy_apps.list
+state/first_run_complete
 state/cache/
 state/logs/
 build/
