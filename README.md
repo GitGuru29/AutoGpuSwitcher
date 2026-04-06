@@ -2,9 +2,22 @@
 
 Automatic GPU selection scaffold for Arch Linux.
 
-This project is organized around:
+## Phase 1
 
-- a `pacman` hook that detects new installs
-- an analyzer that classifies apps as heavy or light
-- a lightweight launcher/interceptor path for dGPU launches
-- persistent state for heavy app tracking and first-run setup
+Phase 1 implements the detection pipeline:
+
+- a `pacman` hook that reacts to package installs and upgrades
+- a shell analyzer that inspects ELF executables with `ldd`
+- a first-run scan for applications installed before AutoGpuSwitcher
+- persistent state in `state/heavy_apps.list`
+
+Heavy applications are detected by matching linked libraries against
+[`analyzer/config/heavy_libs.conf`](./analyzer/config/heavy_libs.conf).
+
+## Key Entrypoints
+
+- `setup/first_run.sh`: prompts for the initial scan
+- `analyzer/scripts/initial_scan.sh`: rebuilds the heavy app list
+- `analyzer/scripts/analyze_package.sh`: analyzes pacman-owned files
+- `analyzer/scripts/analyze_binary.sh`: analyzes specific ELF binaries
+- `pacman-hook/post_transaction.sh`: hook entrypoint for new installs
