@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Queue AutoGpuSwitcher analysis for newly installed packages
+When = PostTransaction
+Exec = /usr/bin/env bash /usr/lib/autogpuswitcher/hooks/post_transaction.sh
