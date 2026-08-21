@@ -1,0 +1,6 @@
+# Enable runtime PM for NVIDIA GPU
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{power/control}="auto"
+
+# Disable runtime PM when AC is connected (let daemon manage)
+SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ATTR{online}=="1", RUN+="/usr/bin/titan-gpu power on"
+SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ATTR{online}=="0", RUN+="/usr/bin/titan-gpu power auto"

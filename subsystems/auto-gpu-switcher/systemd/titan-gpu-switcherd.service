@@ -1,0 +1,14 @@
+[Unit]
+Description=Titan GPU Auto-Switcher Daemon
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/titan-gpu-switcherd
+Restart=on-failure
+RestartSec=5
+ExecStopPost=/bin/rm -f /tmp/titan-gpu-daemon.sock
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,28 @@
+# /etc/titan-gpu/config — Standalone (no THM)
+
+[power]
+default_profile = balanced
+battery_profile = saver
+dgpu_idle_timeout_sec = 30
+power_transition_timeout_ms = 1000
+
+[detector]
+nvidia_driver = auto
+render_node_igpu =
+render_node_dgpu =
+
+[apps]
+steam = dgpu
+lutris = dgpu
+blender = dgpu
+obs-studio = dgpu
+mpv = dgpu
+kitty = igpu
+falkon = igpu
+code = igpu
+
+[patterns]
+*game* = dgpu
+*browser* = igpu
+*editor* = igpu
+*terminal* = igpu

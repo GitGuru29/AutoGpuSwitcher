@@ -1,0 +1,310 @@
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <signal.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <iostream>
+#include <string>
+
+#include "cli.hpp"
+#include "config.hpp"
+#include "gpu_detector.hpp"
+#include "gpu_enforcer.hpp"
+#include "hyprland_ipc_bridge.hpp"
+#include "power_manager.hpp"
+#include "state_writer.hpp"
+#include "workload_classifier.hpp"
+
+static std::atomic<bool> g_running{true};
+static std::atomic<bool> g_reload{false};
+
+static void handle_signal(int sig) {
+    if (sig == SIGTERM || sig == SIGINT) g_running = false;
+    if (sig == SIGHUP) g_reload = true;
+}
+
+static std::string get_socket_path() {
+    const char* env = std::getenv("TITAN_SOCKET_PATH");
+    return env ? std::string(env) : "/tmp/titan-gpu-daemon.sock";
+}
+
+class Daemon {
+public:
+    bool init() {
+        auto& cfg = titan::Config::instance();
+        if (!cfg.load(titan::Config::default_path())) {
+            std::cerr << "[daemon] using defaults (config not found)\n";
+        }
+
+        if (!detector_.scan()) {
+            std::cerr << "[daemon] no GPUs detected, running in iGPU-only mode\n";
+        }
+
+        if (!power_.init()) {
+            std::cerr << "[daemon] power manager init failed\n";
+        }
+
+        enforcer_ = std::make_unique<titan::GpuEnforcer>(detector_, power_);
+
+        if (!setup_socket()) {
+            std::cerr << "[daemon] socket setup failed\n";
+            return false;
+        }
+
+        if (!ipc_.connect()) {
+            std::cerr << "[daemon] hyprland IPC unavailable, window tracking disabled\n";
+        }
+
+        ipc_.set_callback([this](const titan::WindowEvent& ev) {
+            on_window_change(ev);
+        });
+
+        state_writer_.write(detector_, power_, current_target_, active_app_);
+        return true;
+    }
+
+    void run() {
+        std::cout << "[daemon] running (pid=" << getpid() << ")\n";
+
+        auto last_activity = std::chrono::steady_clock::now();
+        auto& cfg = titan::Config::instance();
+
+        while (g_running) {
+            if (g_reload) {
+                g_reload = false;
+                cfg.reload();
+                std::cout << "[daemon] config reloaded\n";
+            }
+
+            ipc_.poll(500);
+
+            if (enforcer_->has_active_dgpu_clients()) {
+                last_activity = std::chrono::steady_clock::now();
+            } else {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - last_activity).count();
+                if (static_cast<uint32_t>(elapsed) >= cfg.power().dgpu_idle_timeout_sec) {
+                    enforcer_->idle_power_off(cfg.power().dgpu_idle_timeout_sec);
+                    last_activity = std::chrono::steady_clock::now();
+                }
+            }
+
+            state_writer_.write(detector_, power_, current_target_, active_app_);
+            handle_commands();
+        }
+
+        cleanup();
+        std::cout << "[daemon] shut down\n";
+    }
+
+private:
+    void on_window_change(const titan::WindowEvent& ev) {
+        std::cout << "[ipc] active window: " << ev.wm_class << " (" << ev.title << ")\n";
+        active_app_ = ev.wm_class;
+
+        titan::EnforcementResult result;
+        if (manual_override_active_) {
+            result = enforcer_->enforce_target(manual_override_);
+        } else {
+            result = enforcer_->enforce_for_app(ev.wm_class);
+        }
+        current_target_ = result.target;
+
+        if (result.power_transitioned) {
+            std::cout << "[ipc] power transitioned for " << ev.wm_class << "\n";
+        }
+    }
+
+    bool setup_socket() {
+        auto socket_path = get_socket_path();
+        ::unlink(socket_path.c_str());
+
+        listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (listen_fd_ < 0) {
+            std::cerr << "[daemon] socket() failed: " << std::strerror(errno) << "\n";
+            return false;
+        }
+
+        struct sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+
+        if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+            std::cerr << "[daemon] bind() failed: " << std::strerror(errno) << "\n";
+            close(listen_fd_);
+            listen_fd_ = -1;
+            return false;
+        }
+
+        if (listen(listen_fd_, 5) < 0) {
+            std::cerr << "[daemon] listen() failed: " << std::strerror(errno) << "\n";
+            close(listen_fd_);
+            listen_fd_ = -1;
+            return false;
+        }
+
+        std::cout << "[daemon] listening on " << socket_path << "\n";
+        return true;
+    }
+
+    void handle_commands() {
+        if (listen_fd_ < 0) return;
+
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(listen_fd_, &fds);
+
+        struct timeval tv{};
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000;
+
+        int ret = select(listen_fd_ + 1, &fds, nullptr, nullptr, &tv);
+        if (ret <= 0) return;
+
+        int client_fd = accept(listen_fd_, nullptr, nullptr);
+        if (client_fd < 0) return;
+
+        char buf[256]{};
+        ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            std::string cmd(buf, static_cast<size_t>(n));
+            auto response = process_command(cmd);
+            send(client_fd, response.c_str(), response.size(), 0);
+        }
+        close(client_fd);
+    }
+
+    std::string process_command(const std::string& raw) {
+        std::string cmd = raw;
+        while (!cmd.empty() && cmd.back() == '\n') cmd.pop_back();
+
+        if (cmd == "status") {
+            return get_status();
+        }
+
+        if (cmd.substr(0, 4) == "set ") {
+            auto target_str = cmd.substr(4);
+            auto target = titan::Classifier::string_to_target(target_str);
+            if (target == titan::GpuTarget::Auto && target_str != "auto") {
+                return "error: invalid target (igpu, dgpu, auto)\n";
+            }
+            manual_override_ = target;
+            manual_override_active_ = (target != titan::GpuTarget::Auto);
+            auto result = enforcer_->enforce_target(target);
+            current_target_ = result.target;
+            return std::string("set -> ") + titan::Classifier::target_to_string(target) + "\n";
+        }
+
+        if (cmd.substr(0, 6) == "power ") {
+            auto state_str = cmd.substr(6);
+            auto dgpu = detector_.find_dgpu();
+            if (!dgpu) return "error: no dGPU found\n";
+
+            if (state_str == "on") {
+                power_.power_on_dgpu(dgpu->pci_addr);
+                return "dGPU power -> on\n";
+            } else if (state_str == "off") {
+                power_.power_off_dgpu(dgpu->pci_addr);
+                return "dGPU power -> off\n";
+            } else if (state_str == "auto") {
+                power_.power_auto_dgpu(dgpu->pci_addr);
+                return "dGPU power -> auto\n";
+            }
+            return "error: invalid power state (on, off, auto)\n";
+        }
+
+        if (cmd == "reload") {
+            titan::Config::instance().reload();
+            return "config reloaded\n";
+        }
+
+        if (cmd.substr(0, 8) == "profile ") {
+            auto profile = cmd.substr(8);
+            if (profile == "balanced" || profile == "saver" || profile == "performance") {
+                return "profile -> " + profile + "\n";
+            }
+            return "error: invalid profile (balanced, saver, performance)\n";
+        }
+
+        return "error: unknown command\n";
+    }
+
+    std::string get_status() {
+        std::string out;
+        out += "GPUs:\n";
+        for (const auto& g : detector_.gpus()) {
+            out += "  " + g.vendor_name + " [" + g.pci_addr + "]"
+                   + " render=" + g.render_node
+                   + " connected=" + (g.is_connected ? "yes" : "no") + "\n";
+        }
+        out += "Power: " + std::string(power_.is_on_battery() ? "battery" : "AC") + "\n";
+        out += "Target: " + std::string(titan::Classifier::target_to_string(current_target_)) + "\n";
+        out += "Active: " + active_app_ + "\n";
+
+        auto dgpu = detector_.find_dgpu();
+        if (dgpu) {
+            auto ps = power_.get_pci_power(dgpu->pci_addr);
+            out += "dGPU power: " + std::string(ps == titan::PowerState::On ? "on" : ps == titan::PowerState::Off ? "off" : "auto") + "\n";
+        }
+
+        if (manual_override_active_) {
+            out += "Manual override: " + std::string(titan::Classifier::target_to_string(manual_override_)) + "\n";
+        }
+
+        return out;
+    }
+
+    void cleanup() {
+        ipc_.disconnect();
+        if (listen_fd_ >= 0) {
+            close(listen_fd_);
+            listen_fd_ = -1;
+        }
+        auto socket_path = get_socket_path();
+        ::unlink(socket_path.c_str());
+
+        auto dgpu = detector_.find_dgpu();
+        if (dgpu) {
+            power_.power_auto_dgpu(dgpu->pci_addr);
+        }
+    }
+
+    titan::GpuDetector detector_;
+    titan::PowerManager power_;
+    std::unique_ptr<titan::GpuEnforcer> enforcer_;
+    titan::HyprlandIpcBridge ipc_;
+    titan::StateWriter state_writer_;
+
+    titan::GpuTarget current_target_ = titan::GpuTarget::Auto;
+    std::string active_app_;
+    titan::GpuTarget manual_override_ = titan::GpuTarget::Auto;
+    bool manual_override_active_ = false;
+
+    int listen_fd_ = -1;
+};
+
+int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+
+    struct sigaction sa{};
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGHUP, &sa, nullptr);
+
+    Daemon daemon;
+    if (!daemon.init()) {
+        std::cerr << "[daemon] initialization failed\n";
+        return 1;
+    }
+
+    daemon.run();
+    return 0;
+}

@@ -1,0 +1,13 @@
+/* Titan GPU Waybar Widget — Catppuccin Mocha */
+#custom-titan-gpu {
+    padding: 0 8px;
+    color: #cdd6f4;
+    background: #313244;
+    border-radius: 8px;
+    margin: 4px 2px;
+    font-weight: bold;
+}
+
+#custom-titan-gpu:hover {
+    background: #45475a;
+}
