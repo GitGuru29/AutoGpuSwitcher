@@ -104,9 +104,10 @@ MOCK_HYPR_LOG="$SANDBOX/hypr_events.log"
 mkdir -p "$MOCK_HYPR_DIR"
 
 python3 "$MOCK_HYPR" "$MOCK_HYPR_SOCK" "$MOCK_HYPR_LOG" \
-    "activewindowv2>>0x1a,100,steam,My Game" \
-    "activewindowv2>>0x2b,200,kitty,Terminal" \
-    "activewindowv2>>0x3c,300,firefox,Browser" &
+    "activewindowv2>>0x1a,100,kitty,Terminal" \
+    "activewindowv2>>0x2b,200,steam,My Game" \
+    "activewindowv2>>0x3c,300,firefox,Browser" \
+    "activewindowv2>>0x4d,400,blender,Blender 3D" &
 MOCK_HYPR_PID=$!
 sleep 0.3
 echo "[sandbox] mock Hyprland IPC: $MOCK_HYPR_SOCK"
@@ -259,7 +260,7 @@ else
 fi
 
 echo ""
-echo "--- Hyprland IPC Window Tracking ---"
+echo "--- Hyprland IPC Window Tracking & GPU Switching ---"
 sleep 2
 if [ -f "$MOCK_HYPR_LOG" ]; then
     EVENTS=$(cat "$MOCK_HYPR_LOG")
@@ -271,7 +272,7 @@ if [ -f "$MOCK_HYPR_LOG" ]; then
         FAIL=$((FAIL + 1))
     fi
     if echo "$EVENTS" | grep -q "sent:"; then
-        echo "  PASS  Mock events delivered"
+        echo "  PASS  Mock events delivered (kitty -> steam -> firefox -> blender)"
         PASS=$((PASS + 1))
     else
         echo "  FAIL  No events delivered"
@@ -280,6 +281,29 @@ if [ -f "$MOCK_HYPR_LOG" ]; then
 else
     echo "  WARN  Hyprland event log not found"
 fi
+
+echo ""
+echo "--- Phase 2 Interceptor Launcher ---"
+PROJECT_ROOT="$(cd "$SUBSYSTEM_DIR/../.." && pwd)"
+LAUNCHER_BIN="$PROJECT_ROOT/interceptor/build/autogpuswitcher-launcher"
+HEAVY_LIST="$SANDBOX/heavy_apps.list"
+cat > "$HEAVY_LIST" << 'HLSEOF'
+arch-linux|blender|/usr/bin/blender
+arch-linux|steam|/usr/bin/steam
+HLSEOF
+export AUTOGPUSWITCHER_HEAVY_LIST_FILE="$HEAVY_LIST"
+
+if [ -x "$LAUNCHER_BIN" ]; then
+    run_test "Launcher detects heavy app (blender)" "heavy app detected" "$LAUNCHER_BIN" --dry-run /usr/bin/blender
+    run_test "Launcher detects standard app (kitty)" "standard app detected" "$LAUNCHER_BIN" --dry-run /usr/bin/kitty
+    run_test "Launcher force-dgpu flag" "heavy app detected" "$LAUNCHER_BIN" --force-dgpu --dry-run /usr/bin/kitty
+else
+    echo "  WARN  Launcher binary not found at $LAUNCHER_BIN"
+fi
+
+echo ""
+echo "--- Waybar Custom Module ---"
+run_test "Waybar module execution" "App: blender" "$SUBSYSTEM_DIR/waybar/titan-gpu.sh"
 
 echo ""
 echo "--- Daemon Log (last 20 lines) ---"
