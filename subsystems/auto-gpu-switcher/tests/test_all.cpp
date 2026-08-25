@@ -586,6 +586,44 @@ TEST_F(EnforcerTest, ResetDGPUClients) {
     EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
 }
 
+TEST_F(EnforcerTest, WindowSetTrackingPreventsInflation) {
+    // Repeated focus on the same window address must not inflate client count beyond 1
+    for (int i = 0; i < 10; ++i) {
+        enforcer_->enforce_for_app_window("steam", "0x100");
+    }
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 1u);
+
+    // Remove window 0x100
+    enforcer_->remove_dgpu_window("0x100");
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+}
+
+TEST_F(EnforcerTest, WindowSwitchingBetweenGPUs) {
+    // Focus Steam on dGPU (0x101)
+    auto res1 = enforcer_->enforce_for_app_window("steam", "0x101");
+    EXPECT_EQ(res1.target, titan::GpuTarget::DGPU);
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 1u);
+
+    // Focus Kitty on iGPU (0x102) -> Steam (0x101) remains open in background
+    auto res2 = enforcer_->enforce_for_app_window("kitty", "0x102");
+    EXPECT_EQ(res2.target, titan::GpuTarget::IGPU);
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+
+    // Focus Blender on dGPU (0x103) -> 2 dGPU windows open
+    auto res3 = enforcer_->enforce_for_app_window("blender", "0x103");
+    EXPECT_EQ(res3.target, titan::GpuTarget::DGPU);
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 2u);
+
+    // Close Steam (0x101) -> 1 dGPU window remaining
+    enforcer_->remove_dgpu_window("0x101");
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 1u);
+
+    // Close Blender (0x103) -> 0 dGPU windows remaining
+    enforcer_->remove_dgpu_window("0x103");
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+}
+
 // ═════════════════════════════════════════════
 // EDGE CASE TESTS
 // ═════════════════════════════════════════════

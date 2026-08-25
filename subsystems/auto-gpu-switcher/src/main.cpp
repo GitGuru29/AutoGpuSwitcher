@@ -104,14 +104,20 @@ public:
 
 private:
     void on_window_change(const titan::WindowEvent& ev) {
-        std::cout << "[ipc] active window: " << ev.wm_class << " (" << ev.title << ")\n";
+        if (ev.type == titan::WindowEventType::Closed) {
+            std::cout << "[ipc] window closed: addr=" << ev.addr << "\n";
+            enforcer_->remove_dgpu_window(ev.addr);
+            return;
+        }
+
+        std::cout << "[ipc] active window: " << ev.wm_class << " (" << ev.title << ") addr=" << ev.addr << "\n";
         active_app_ = ev.wm_class;
 
         titan::EnforcementResult result;
         if (manual_override_active_) {
-            result = enforcer_->enforce_target(manual_override_);
+            result = enforcer_->enforce_target_window(manual_override_, ev.addr);
         } else {
-            result = enforcer_->enforce_for_app(ev.wm_class);
+            result = enforcer_->enforce_for_app_window(ev.wm_class, ev.addr);
         }
         current_target_ = result.target;
 

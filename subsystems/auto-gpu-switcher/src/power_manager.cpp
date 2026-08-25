@@ -5,15 +5,32 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
 namespace titan {
 
 bool PowerManager::init() {
-    ac_path_ = "/sys/class/power_supply/AC/online";
-    if (!std::filesystem::exists(ac_path_)) {
-        const char* alt = std::getenv("AC_PATH");
-        if (alt) ac_path_ = alt;
+    const char* alt = std::getenv("AC_PATH");
+    if (alt && *alt) {
+        ac_path_ = alt;
+        return true;
     }
+
+    const std::vector<std::string> candidates = {
+        "/sys/class/power_supply/AC/online",
+        "/sys/class/power_supply/ACAD/online",
+        "/sys/class/power_supply/ADP1/online",
+        "/sys/class/power_supply/AC0/online"
+    };
+
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate)) {
+            ac_path_ = candidate;
+            return true;
+        }
+    }
+
+    ac_path_ = "/sys/class/power_supply/AC/online";
     return true;
 }
 

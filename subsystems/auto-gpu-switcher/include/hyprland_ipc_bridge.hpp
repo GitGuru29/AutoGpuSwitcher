@@ -6,7 +6,13 @@
 
 namespace titan {
 
+enum class WindowEventType {
+    Active,
+    Closed,
+};
+
 struct WindowEvent {
+    WindowEventType type = WindowEventType::Active;
     std::string addr;
     std::string pid;
     std::string wm_class;

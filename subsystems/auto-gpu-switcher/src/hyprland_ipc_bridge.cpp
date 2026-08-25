@@ -104,37 +104,54 @@ bool HyprlandIpcBridge::poll(int timeout_ms) {
 }
 
 bool HyprlandIpcBridge::parse_event(const std::string& event) {
-    const std::string prefix = "activewindowv2>>";
-    if (event.substr(0, prefix.size()) != prefix) return false;
+    const std::string active_prefix = "activewindowv2>>";
+    const std::string close_prefix = "closewindow>>";
 
-    auto payload = event.substr(prefix.size());
-    auto first_comma = payload.find(',');
-    auto second_comma = payload.find(',', first_comma + 1);
-    auto third_comma = payload.find(',', second_comma + 1);
+    if (event.substr(0, active_prefix.size()) == active_prefix) {
+        auto payload = event.substr(active_prefix.size());
+        auto first_comma = payload.find(',');
+        auto second_comma = payload.find(',', first_comma + 1);
+        auto third_comma = payload.find(',', second_comma + 1);
 
-    WindowEvent we;
-    if (first_comma != std::string::npos) {
-        we.addr = payload.substr(0, first_comma);
-    }
-    if (first_comma != std::string::npos && second_comma != std::string::npos) {
-        we.pid = payload.substr(first_comma + 1, second_comma - first_comma - 1);
-    }
-    if (second_comma != std::string::npos) {
-        if (third_comma != std::string::npos) {
-            we.wm_class = payload.substr(second_comma + 1, third_comma - second_comma - 1);
-        } else {
-            we.wm_class = payload.substr(second_comma + 1);
+        WindowEvent we;
+        we.type = WindowEventType::Active;
+        if (first_comma != std::string::npos) {
+            we.addr = payload.substr(0, first_comma);
         }
-    }
-    if (third_comma != std::string::npos) {
-        we.title = payload.substr(third_comma + 1);
+        if (first_comma != std::string::npos && second_comma != std::string::npos) {
+            we.pid = payload.substr(first_comma + 1, second_comma - first_comma - 1);
+        }
+        if (second_comma != std::string::npos) {
+            if (third_comma != std::string::npos) {
+                we.wm_class = payload.substr(second_comma + 1, third_comma - second_comma - 1);
+            } else {
+                we.wm_class = payload.substr(second_comma + 1);
+            }
+        }
+        if (third_comma != std::string::npos) {
+            we.title = payload.substr(third_comma + 1);
+        }
+
+        if (callback_ && !we.wm_class.empty()) {
+            callback_(we);
+        }
+        return true;
+    } else if (event.substr(0, close_prefix.size()) == close_prefix) {
+        auto addr = event.substr(close_prefix.size());
+        while (!addr.empty() && (addr.back() == '\r' || addr.back() == '\n' || addr.back() == ' '))
+            addr.pop_back();
+
+        WindowEvent we;
+        we.type = WindowEventType::Closed;
+        we.addr = addr;
+
+        if (callback_ && !we.addr.empty()) {
+            callback_(we);
+        }
+        return true;
     }
 
-    if (callback_ && !we.wm_class.empty()) {
-        callback_(we);
-    }
-
-    return true;
+    return false;
 }
 
 }  // namespace titan
