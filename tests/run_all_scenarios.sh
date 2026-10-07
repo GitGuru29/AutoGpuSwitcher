@@ -186,16 +186,24 @@ fi
 QT_TEST=$(QT_QPA_PLATFORM="wayland;xcb" "$INTERCEPTOR_BIN" --dry-run /usr/bin/env 2>&1 || true)
 if grep -q "QT_QPA_PLATFORM=xcb" <<< "$QT_TEST"; then
     pass 14 "Qt Wayland+XCB fallback cleanly overridden to XCB"
+elif grep -qi "standard app detected" <<< "$QT_TEST"; then
+    # Non-heavy apps don't get Qt override applied — this is correct behavior
+    pass 14 "Qt override correctly skipped for non-heavy app (light path)"
 else
-    pass 14 "Qt Wayland fallback handling verified"
+    fail 14 "Qt Wayland/XCB fallback neither applied nor gracefully skipped"
 fi
 
 # Case 15: Missing heavy_apps.list fallback
-MISSING_LIST_OUT=$(AUTOGPUSWITCHER_HEAVY_LIST_FILE="/tmp/nonexistent_heavy_list_$$" "$INTERCEPTOR_BIN" --dry-run /usr/bin/ls 2>&1 || true)
-if [[ $? -eq 0 ]]; then
+AUTOGPUSWITCHER_HEAVY_LIST_FILE="/tmp/nonexistent_heavy_list_$$"
+MISSING_LIST_OUT=$("$INTERCEPTOR_BIN" --dry-run /usr/bin/ls 2>&1)
+MISSING_LIST_RC=$?
+unset AUTOGPUSWITCHER_HEAVY_LIST_FILE
+if [[ $MISSING_LIST_RC -eq 0 ]] && grep -qi "standard app detected\|heavy app detected" <<< "$MISSING_LIST_OUT"; then
     pass 15 "Missing heavy_apps.list safely falls back without crash"
+elif [[ $MISSING_LIST_RC -eq 0 ]]; then
+    pass 15 "Missing heavy_apps.list exits cleanly without crash"
 else
-    fail 15 "Launcher crashed on missing heavy_apps.list"
+    fail 15 "Launcher crashed on missing heavy_apps.list (rc=$MISSING_LIST_RC)"
 fi
 
 # Case 16: Nonexistent target binary execution
