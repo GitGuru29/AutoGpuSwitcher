@@ -685,15 +685,23 @@ def decide_and_switch():
             log("Switched to Intel iGPU for power saving (balanced pattern)")
 
 
-def main():
-    # Allow `gpu_auto_switcher.py power` for power report
-    if len(sys.argv) > 1 and sys.argv[1] in ("power", "--power"):
+def run_subcommand(argv):
+    """Handle CLI subcommands before the default switch cycle.
+
+    Returns True if a subcommand was handled, False to run normal cycle.
+    """
+    if len(argv) < 2:
+        return False
+
+    cmd = argv[1]
+
+    if cmd in ("power", "--power"):
         power = read_power_supply()
         ac = read_ac_online()
         drain = compute_drain_rate()
         if power is None:
             print("No battery found.")
-            return
+            return True
         print("Battery: {}  Capacity: {}%  Power: {:.1f}W  AC: {}".format(
             power.get("bat", "?"), power.get("capacity", "?"),
             power["power_w"], "connected" if ac else "disconnected"))
@@ -701,6 +709,79 @@ def main():
             print("Average drain (60min): {:.1f}W".format(drain))
         else:
             print("Drain rate: insufficient data")
+        return True
+
+    if cmd in ("rescan", "--rescan"):
+        # Phase 3 item 8: rebuild heavy app state from scratch
+        log("=== Rescan: rebuilding heavy app state ===")
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        scan_script = os.path.join(project_root, "analyzer",
+                                   "scripts", "initial_scan.sh")
+        if not os.path.exists(scan_script):
+            scan_script = "/usr/lib/autogpuswitcher/initial_scan.sh"
+        if os.path.exists(scan_script):
+            ret = os.system("bash '{}' --yes 2>&1".format(scan_script))
+            log("initial_scan.sh exited: {}".format(ret))
+        else:
+            log("ERROR: initial_scan.sh not found. "
+                "Reinstall with sudo ./setup/install_phase1.sh")
+            return True
+
+        # Also regenerate desktop entries after rescan
+        run_subcommand(argv[:1] + ["desktop"])
+        return True
+
+    if cmd in ("desktop", "--desktop"):
+        # Phase 3 item 7: rebuild .desktop integration
+        log("=== Rebuilding desktop integration ===")
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        gen_script = os.path.join(project_root, "integration", "desktop",
+                                  "generate_desktop_entries.sh")
+        if not os.path.exists(gen_script):
+            gen_script = "/usr/lib/autogpuswitcher/generate_desktop_entries.sh"
+        if os.path.exists(gen_script):
+            ret = os.system("bash '{}' 2>&1".format(gen_script))
+            log("desktop generator exited: {}".format(ret))
+        else:
+            log("ERROR: generate_desktop_entries.sh not found.")
+        return True
+
+    if cmd in ("status", "--status"):
+        history = load_history()
+        decision = analyze_workload(history)
+        tod = predict_from_time_of_day(history)
+        current = get_current_gpu()
+        power = read_power_supply()
+        print("Tracked apps:        {}".format(len(history)))
+        print("Workload decision:   {}".format(decision))
+        print("Time-of-day pred:    {}".format(tod or "insufficient data"))
+        print("Current GPU state:   {}".format(current))
+        print("Titan daemon:        {}".format(
+            "available" if titan_available() else "not detected"))
+        if power:
+            print("Power:               {:.1f}W capacity={} AC={}".format(
+                power["power_w"], power.get("capacity"),
+                "yes" if read_ac_online() else "no"))
+        return True
+
+    if cmd in ("help", "--help", "-h"):
+        print("Usage: gpu_auto_switcher.py [COMMAND]")
+        print()
+        print("Commands:")
+        print("  (none)    Run one switch cycle (default)")
+        print("  power     Show battery/power report")
+        print("  status    Show current workload and GPU status")
+        print("  rescan    Rebuild heavy_apps.list from scratch + desktop entries")
+        print("  desktop   Regenerate .desktop integration only")
+        print("  help      Show this message")
+        return True
+
+    return False
+
+
+def main():
+    # Handle CLI subcommands
+    if run_subcommand(sys.argv):
         return
 
     log("=== GPU Auto-Switcher starting ===")

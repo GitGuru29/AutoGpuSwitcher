@@ -5,10 +5,21 @@
 set -euo pipefail
 
 DESKTOP_DIR="${1:-$HOME/.local/share/applications/autogpuswitcher}"
-HEAVY_LIST="${AUTOGPUSWITCHER_HEAVY_LIST_FILE:-/var/lib/autogpuswitcher/heavy_apps.list}"
+
+# Resolve heavy_apps.list: env var → system install → dev checkout
+if [[ -n "${AUTOGPUSWITCHER_HEAVY_LIST_FILE:-}" ]]; then
+    HEAVY_LIST="$AUTOGPUSWITCHER_HEAVY_LIST_FILE"
+elif [[ -f /var/lib/autogpuswitcher/heavy_apps.list ]]; then
+    HEAVY_LIST="/var/lib/autogpuswitcher/heavy_apps.list"
+else
+    # Dev checkout: repo-root/state/heavy_apps.list
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    HEAVY_LIST="$(cd "$SCRIPT_DIR/../.." && pwd)/state/heavy_apps.list"
+fi
 
 if [[ ! -f "$HEAVY_LIST" ]]; then
-    echo "ERROR: heavy_apps.list not found at $HEAVY_LIST" >&2
+    echo "ERROR: heavy_apps.list not found (checked \$AUTOGPUSWITCHER_HEAVY_LIST_FILE," >&2
+    echo "       /var/lib/autogpuswitcher/, and repo state/)" >&2
     echo "Run 'sudo ./setup/first_run.sh' first." >&2
     exit 1
 fi
