@@ -49,6 +49,7 @@ public:
             std::cerr << "[daemon] power manager init failed\n";
         }
 
+        profile_idle_timeout_ = cfg.power().dgpu_idle_timeout_sec;
         enforcer_ = std::make_unique<titan::GpuEnforcer>(detector_, power_);
 
         if (!setup_socket()) {
@@ -78,6 +79,8 @@ public:
             if (g_reload) {
                 g_reload = false;
                 cfg.reload();
+                // Re-apply current profile with new config defaults
+                apply_profile(current_profile_);
                 std::cout << "[daemon] config reloaded\n";
             }
 
@@ -88,8 +91,8 @@ public:
             } else {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now() - last_activity).count();
-                if (static_cast<uint32_t>(elapsed) >= cfg.power().dgpu_idle_timeout_sec) {
-                    enforcer_->idle_power_off(cfg.power().dgpu_idle_timeout_sec);
+                if (static_cast<uint32_t>(elapsed) >= profile_idle_timeout_) {
+                    enforcer_->idle_power_off(profile_idle_timeout_);
                     last_activity = std::chrono::steady_clock::now();
                 }
             }
@@ -232,6 +235,8 @@ private:
         if (cmd.substr(0, 8) == "profile ") {
             auto profile = cmd.substr(8);
             if (profile == "balanced" || profile == "saver" || profile == "performance") {
+                current_profile_ = profile;
+                apply_profile(profile);
                 return "profile -> " + profile + "\n";
             }
             return "error: invalid profile (balanced, saver, performance)\n";
@@ -251,6 +256,7 @@ private:
         out += "Power: " + std::string(power_.is_on_battery() ? "battery" : "AC") + "\n";
         out += "Target: " + std::string(titan::Classifier::target_to_string(current_target_)) + "\n";
         out += "Active: " + active_app_ + "\n";
+        out += "Profile: " + current_profile_ + "\n";
 
         auto dgpu = detector_.find_dgpu();
         if (dgpu) {
@@ -263,6 +269,34 @@ private:
         }
 
         return out;
+    }
+
+    void apply_profile(const std::string& profile) {
+        auto& cfg = titan::Config::instance();
+        // Profile controls idle power-off aggressiveness:
+        //   saver       -> off immediately when idle (0s grace)
+        //   balanced    -> config default idle timeout
+        //   performance -> keep dGPU warm for 120s after last use
+        uint32_t base_timeout = cfg.power().dgpu_idle_timeout_sec;
+        if (profile == "saver") {
+            profile_idle_timeout_ = 0;
+        } else if (profile == "performance") {
+            profile_idle_timeout_ = 120;
+        } else {
+            profile_idle_timeout_ = base_timeout;
+        }
+
+        // On saver profile, force iGPU when no explicit dGPU client
+        if (profile == "saver" && !enforcer_->has_active_dgpu_clients()) {
+            enforcer_->enforce_target(titan::GpuTarget::IGPU);
+            current_target_ = titan::GpuTarget::IGPU;
+        } else if (profile == "performance" && !manual_override_active_) {
+            enforcer_->enforce_target(titan::GpuTarget::DGPU);
+            current_target_ = titan::GpuTarget::DGPU;
+        }
+
+        std::cout << "[daemon] profile applied: " << profile
+                  << " (idle_timeout=" << profile_idle_timeout_ << "s)\n";
     }
 
     void cleanup() {
@@ -290,6 +324,8 @@ private:
     std::string active_app_;
     titan::GpuTarget manual_override_ = titan::GpuTarget::Auto;
     bool manual_override_active_ = false;
+    std::string current_profile_ = "balanced";
+    uint32_t profile_idle_timeout_ = 0;
 
     int listen_fd_ = -1;
 };
