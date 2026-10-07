@@ -579,6 +579,23 @@ TEST_F(EnforcerTest, ManualOverrideDGPU) {
     EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
 }
 
+TEST_F(EnforcerTest, IdempotentDGPUOverrideNoLeak) {
+    // Regression: repeated `set dgpu` then one `set igpu` used to leave
+    // the counter >0 forever, so idle_power_off() never fired.
+    enforcer_->enforce_target(titan::GpuTarget::DGPU, /*idempotent=*/true);
+    enforcer_->enforce_target(titan::GpuTarget::DGPU, /*idempotent=*/true);
+    enforcer_->enforce_target(titan::GpuTarget::DGPU, /*idempotent=*/true);
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 1u);
+
+    enforcer_->enforce_target(titan::GpuTarget::IGPU, /*idempotent=*/true);
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 0u);
+
+    // idle power-off must now be able to run
+    enforcer_->idle_power_off(0);
+}
+
 TEST_F(EnforcerTest, ResetDGPUClients) {
     enforcer_->enforce_for_app("steam");
     EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
@@ -789,4 +806,176 @@ TEST_F(IntegrationTest, ManualOverrideIgnoresRules) {
     auto result = enforcer_->enforce_target(titan::GpuTarget::IGPU);
     EXPECT_EQ(result.target, titan::GpuTarget::IGPU);
     EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+}
+
+// ─────────────────────────────────────────────
+// WorkloadAnalyzer (C++ port of analyzer/workload_analyzer.py)
+// ─────────────────────────────────────────────
+#include "workload_analyzer.hpp"
+
+static fs::path write_history(const std::string& content) {
+    auto p = fs::path("/tmp") / ("titan_test_hist_" + std::to_string(getpid()) + ".dat");
+    std::ofstream f(p);
+    f << content;
+    f.close();
+    return p;
+}
+
+static std::string iso_ago(int seconds_ago) {
+    std::time_t t = std::time(nullptr) - seconds_ago;
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+    return buf;
+}
+
+TEST(WorkloadAnalyzerTest, EmptyHistoryYieldsAuto) {
+    auto p = write_history("# titan-workload-history v1\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 0u);
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::Auto);
+    EXPECT_EQ(wa.predict_time_of_day(), titan::GpuTarget::Auto);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, ParsesLineFormat) {
+    auto now = iso_ago(0);
+    auto p = write_history(
+        "# titan-workload-history v1\n"
+        "/usr/bin/steam|5|nvidia|" + now + "|nvidia:" + now + ",nvidia:" + now + "\n"
+        "/usr/bin/vim|3|intel|" + now + "|intel:" + now + "\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 2u);
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::Auto);  // only 2 apps < 4
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, StrongNvidiaWorkloadYieldsDGPU) {
+    auto now = iso_ago(0);
+    std::string content = "# titan-workload-history v1\n";
+    for (int i = 0; i < 5; i++) {
+        content += "/usr/bin/steam" + std::to_string(i) + "|10|nvidia|" + now +
+                   "|nvidia:" + now + "\n";
+    }
+    auto p = write_history(content);
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 5u);
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::DGPU);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, StrongIntelWorkloadYieldsIGPU) {
+    auto now = iso_ago(0);
+    std::string content = "# titan-workload-history v1\n";
+    for (int i = 0; i < 5; i++) {
+        content += "/usr/bin/app" + std::to_string(i) + "|10|intel|" + now +
+                   "|intel:" + now + "\n";
+    }
+    auto p = write_history(content);
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::IGPU);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, BalancedWorkloadYieldsAuto) {
+    auto now = iso_ago(0);
+    std::string content = "# titan-workload-history v1\n";
+    for (int i = 0; i < 4; i++) {
+        std::string gpu = (i % 2 == 0) ? "nvidia" : "intel";
+        content += "/usr/bin/app" + std::to_string(i) + "|10|" + gpu + "|" + now +
+                   "|" + gpu + ":" + now + "\n";
+    }
+    auto p = write_history(content);
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::Auto);  // 40 vs 40, no 1.5x
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, StaleEntriesIgnored) {
+    auto old = iso_ago(3600);  // outside the 600s window
+    std::string content = "# titan-workload-history v1\n";
+    for (int i = 0; i < 5; i++) {
+        content += "/usr/bin/steam" + std::to_string(i) + "|10|nvidia|" + old +
+                   "|nvidia:" + old + "\n";
+    }
+    auto p = write_history(content);
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::Auto);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, MalformedLinesAreSkipped) {
+    auto now = iso_ago(0);
+    auto p = write_history(
+        "# titan-workload-history v1\n"
+        "\n"
+        "garbage_no_pipes\n"
+        "still|bad\n"
+        "ok|not_a_number|intel|" + now + "|intel:" + now + "\n"
+        "/usr/bin/good|1|intel|" + now + "|intel:" + now + "\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 1u);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, ObservationsTrimmedTo100OnLoad) {
+    auto now = iso_ago(0);
+    std::string obs;
+    for (int i = 0; i < 150; i++) {
+        if (i) obs += ",";
+        obs += "intel:" + now;
+    }
+    auto p = write_history(
+        "# titan-workload-history v1\n"
+        "/usr/bin/big|150|intel|" + now + "|" + obs + "\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 1u);
+    EXPECT_NE(wa.analyze(), titan::GpuTarget::DGPU);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, ScanProcessesFindsUserProcessesAndSaves) {
+    auto p = fs::path("/tmp") / ("titan_test_scan_" + std::to_string(getpid()) + ".dat");
+    {
+        titan::WorkloadAnalyzer wa(p.string());
+        int tracked = wa.scan_processes();
+        EXPECT_GT(tracked, 0);
+        EXPECT_GT(wa.entry_count(), 0u);
+        // Atomic save: no .tmp residue after scan
+        EXPECT_FALSE(fs::exists(p.string() + ".tmp"));
+    }
+    // Round-trip: a fresh analyzer must reload what was saved
+    {
+        titan::WorkloadAnalyzer wa2(p.string());
+        EXPECT_GT(wa2.entry_count(), 0u);
+        EXPECT_NE(wa2.status_report().find("Workload decision"),
+                  std::string::npos);
+    }
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, ReloadPicksUpExternalChanges) {
+    auto p = write_history("# titan-workload-history v1\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 0u);
+
+    auto now = iso_ago(0);
+    write_history(
+        "# titan-workload-history v1\n"
+        "/usr/bin/late|1|intel|" + now + "|intel:" + now + "\n");
+    EXPECT_EQ(wa.entry_count(), 0u);  // not yet reloaded
+    wa.reload();
+    EXPECT_EQ(wa.entry_count(), 1u);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, StatusReportContainsFields) {
+    auto p = write_history("# titan-workload-history v1\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    auto report = wa.status_report();
+    EXPECT_NE(report.find("Tracked apps"), std::string::npos);
+    EXPECT_NE(report.find("Workload decision"), std::string::npos);
+    EXPECT_NE(report.find("Time-of-day pred"), std::string::npos);
+    fs::remove(p);
 }

@@ -48,10 +48,12 @@ add_executable(titan-gpu-tests
     src/gpu_enforcer.cpp
     src/hyprland_ipc_bridge.cpp
     src/state_writer.cpp
+    src/workload_analyzer.cpp
 )
 
 target_include_directories(titan-gpu-tests PRIVATE include)
 target_compile_features(titan-gpu-tests PRIVATE cxx_std_17)
+target_compile_options(titan-gpu-tests PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(titan-gpu-tests PRIVATE GTest::gtest GTest::gtest_main)
 
 add_test(NAME TitanGpuTests COMMAND titan-gpu-tests)

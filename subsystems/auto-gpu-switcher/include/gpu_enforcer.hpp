@@ -21,7 +21,12 @@ public:
 
     EnforcementResult enforce_for_app(const std::string& wm_class);
     EnforcementResult enforce_for_app_window(const std::string& wm_class, const std::string& window_addr);
-    EnforcementResult enforce_target(GpuTarget target);
+    // idempotent=true: set semantics (manual override / profile / workload)
+    //   — repeated DGPU calls don't ratchet the counter, IGPU clears it.
+    //   Prevents the leak where `set dgpu` twice then `set igpu` once left
+    //   the counter >0 forever and idle_power_off() never fired.
+    // idempotent=false: refcount semantics (per-app enforcement path).
+    EnforcementResult enforce_target(GpuTarget target, bool idempotent = false);
     EnforcementResult enforce_target_window(GpuTarget target, const std::string& window_addr);
 
     void idle_power_off(uint32_t idle_timeout_sec);

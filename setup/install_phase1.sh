@@ -38,9 +38,16 @@ else
     echo "         Build it first: cmake -B build -S interceptor && cmake --build build" >&2
 fi
 
-# --- Install workload auto-switcher script (Python) ---
-install -m 0755 "${PROJECT_ROOT}/gpu_auto_switcher.py" "${INSTALL_ROOT}/gpu_auto_switcher.py"
-echo "Auto-switcher script installed: ${INSTALL_ROOT}/gpu_auto_switcher.py"
+# --- Install Titan daemon (Phase 3: workload analysis built-in) ---
+for bin in titan-gpu-switcherd titan-gpu; do
+    if [[ -x "${PROJECT_ROOT}/build/${bin}" ]]; then
+        install -m 0755 "${PROJECT_ROOT}/build/${bin}" "${BIN_DIR}/${bin}"
+        echo "Daemon binary installed: ${BIN_DIR}/${bin}"
+    else
+        echo "WARNING: ${bin} not found at ${PROJECT_ROOT}/build/${bin}" >&2
+        echo "         Build it first: cmake -B build -S subsystems/auto-gpu-switcher && cmake --build build" >&2
+    fi
+done
 
 # --- Install systemd units (if systemd is available) ---
 SYSTEMD_DIR=""
@@ -51,7 +58,7 @@ elif [[ -d "${HOME}/.config/systemd/user" ]]; then
 fi
 
 if [[ -n "${SYSTEMD_DIR}" && -d "${PROJECT_ROOT}/integration/systemd" ]]; then
-    for unit in autogpuswitcher.service autogpuswitcher.timer titan-gpu-switcherd.service; do
+    for unit in titan-gpu-switcherd.service; do
         if [[ -f "${PROJECT_ROOT}/integration/systemd/${unit}" ]]; then
             install -m 0644 "${PROJECT_ROOT}/integration/systemd/${unit}" "${SYSTEMD_DIR}/${unit}"
             echo "Systemd unit installed: ${SYSTEMD_DIR}/${unit}"
@@ -73,14 +80,15 @@ fi
 touch "${STATE_DIR}/heavy_apps.list"
 
 echo ""
-echo "Phase 1+2 assets installed."
+echo "Phase 1+2+3 assets installed."
 echo "Hook: ${HOOK_DEST}"
 echo "Runtime state: ${STATE_DIR}"
 echo "Config: ${CONFIG_FILE}"
 echo "Launcher: ${BIN_DIR}/autogpuswitcher-launcher (if built)"
-echo "Auto-switcher: ${INSTALL_ROOT}/gpu_auto_switcher.py"
+echo "Daemon: ${BIN_DIR}/titan-gpu-switcherd (if built)"
 echo ""
 echo "Next steps:"
 echo "  1. sudo ./setup/first_run.sh          # initial heavy-app scan"
-echo "  2. sudo systemctl enable --now autogpuswitcher.timer  # auto-switch timer"
+echo "  2. sudo systemctl enable --now titan-gpu-switcherd  # workload daemon"
 echo "  3. autogpuswitcher-launcher --dry-run glxinfo         # verify launcher"
+echo "  4. titan-gpu workload                # check workload analysis"

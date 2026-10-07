@@ -28,15 +28,17 @@ battery life without manual intervention.
 │  │  • PCI runtime power management                          │   │
 │  │  • AC/Battery power heuristics                           │   │
 │  │  • Unix socket CLI (titan-gpu)                           │   │
+│  │  • WorkloadAnalyzer (in-process /proc scan)              │   │
+│  │      • Per-process GPU usage history                     │   │
+│  │      • Time-of-day workload patterns                     │   │
+│  │      • Auto-switch every 5 minutes (in daemon loop)      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │        ▲                                                        │
-│        │  IPC delegation                                        │
+│        │  IPC delegation (legacy path)                          │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  gpu_auto_switcher.py (workload history)                 │   │
-│  │  • /proc scanning + nvidia-smi polling                   │   │
-│  │  • Per-process GPU usage history                         │   │
-│  │  • Time-of-day workload patterns                         │   │
-│  │  • Auto-switch via Titan daemon → prime-select fallback  │   │
+│  │  gpu_auto_switcher.py — DEPRECATED, fallback only        │   │
+│  │  Not installed by default; kept for root prime-select/   │   │
+│  │  bbswitch setups without the Titan daemon                │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -58,7 +60,7 @@ battery life without manual intervention.
 ### Phase 3: System Integration
 - **Desktop** — generates `.desktop` entries for heavy apps
 - **Shell** — Bash/Fish aliases + universal `autogpu-run` wrapper
-- **Systemd** — timer for auto-switcher + daemon service
+- **Systemd** — `titan-gpu-switcherd` daemon service (includes workload auto-switching)
 
 ### Titan Daemon (C++17, independent subsystem)
 - Monitors Hyprland window focus via IPC
@@ -66,15 +68,17 @@ battery life without manual intervention.
 - AC/Battery power heuristics (`auto` → iGPU on battery, dGPU on AC)
 - `titan-gpu` CLI over unix socket
 - Waybar status module included
-- 68 GTest tests
+- Workload auto-switcher runs in-process every 5 minutes
+- 80 GTest tests
 
-### Workload Auto-Switcher (Python 3)
-- Scans `/proc` for user processes with GPU activity
-- Polls `nvidia-smi` for real utilization + compute app PIDs
+### Workload Auto-Switcher (C++17, built into the daemon)
+- Scans `/proc` for the current user's processes with GPU activity
+- Polls `nvidia-smi` for compute app PIDs (real GPU contexts)
 - Tracks per-process GPU usage history (rolling 100 observations)
 - Learns time-of-day patterns for predictive switching
-- Delegates to Titan daemon via IPC (falls back to prime-select/bbswitch)
-- Runs via systemd timer every 5 minutes
+- Respects manual override and active dGPU windows
+- History: `/var/lib/autogpuswitcher/workload_history.dat`
+- **Python fallback** (`gpu_auto_switcher.py`) kept in-repo only — no longer installed
 
 ## Quick Start
 
@@ -93,13 +97,10 @@ sudo ./setup/install_phase1.sh
 # 4. Initial scan of existing packages
 sudo ./setup/first_run.sh --yes --verbose
 
-# 5. Enable auto-switching timer
-sudo systemctl enable --now autogpuswitcher.timer
-
-# 6. Start the Titan daemon (for window-based power management)
+# 5. Start the Titan daemon (window tracking + workload auto-switching)
 sudo systemctl enable --now titan-gpu-switcherd
 
-# 7. Verify
+# 6. Verify
 autogpuswitcher-launcher --dry-run glxinfo
 titan-gpu status
 ```
@@ -114,7 +115,8 @@ titan-gpu status
 | `titan-gpu status` | Show GPU/daemon status |
 | `titan-gpu set igpu\|dgpu\|auto` | Manual GPU switch |
 | `titan-gpu profile balanced\|saver\|performance` | Power profile |
-| `python3 gpu_auto_switcher.py` | Run workload analysis cycle |
+| `titan-gpu workload` | Show workload analysis status |
+| `titan-gpu workload-rescan` | Force immediate /proc rescan |
 
 ## Configuration
 
@@ -128,10 +130,10 @@ titan-gpu status
 ## Testing
 
 ```bash
-# Full test suite (55 scenarios)
+# Full test suite (60 scenarios)
 bash tests/run_all_scenarios.sh
 
-# GTest unit tests (68 tests)
+# GTest unit tests (80 tests)
 ./build/titan-gpu-tests
 
 # Sandbox test (mock sysfs + Hyprland)
@@ -147,7 +149,7 @@ bash subsystems/auto-gpu-switcher/tests/benchmark.sh
 - NVIDIA proprietary driver with PRIME support
 - CMake ≥ 3.16, C++17 compiler (GCC or Clang)
 - GoogleTest (for tests)
-- Python 3 (stdlib only)
+- Python 3 (optional, only for the deprecated `gpu_auto_switcher.py` fallback)
 - Hyprland (for Titan daemon window tracking)
 - Optional: Waybar (status module), bbswitch, prime-select
 

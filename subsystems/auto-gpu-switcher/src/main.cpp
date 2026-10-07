@@ -14,6 +14,7 @@
 
 #include "cli.hpp"
 #include "config.hpp"
+#include "debug_log.hpp"
 #include "gpu_detector.hpp"
 #include "gpu_enforcer.hpp"
 #include "hyprland_ipc_bridge.hpp"
@@ -178,12 +179,12 @@ private:
 
         if (decision == titan::GpuTarget::DGPU &&
             current_target_ != titan::GpuTarget::DGPU) {
-            auto result = enforcer_->enforce_target(titan::GpuTarget::DGPU);
+            auto result = enforcer_->enforce_target(titan::GpuTarget::DGPU, /*idempotent=*/true);
             current_target_ = result.target;
             std::cout << "[workload] switched to dGPU\n";
         } else if (decision == titan::GpuTarget::IGPU &&
                    current_target_ != titan::GpuTarget::IGPU) {
-            auto result = enforcer_->enforce_target(titan::GpuTarget::IGPU);
+            auto result = enforcer_->enforce_target(titan::GpuTarget::IGPU, /*idempotent=*/true);
             current_target_ = result.target;
             std::cout << "[workload] switched to iGPU\n";
         }
@@ -191,12 +192,12 @@ private:
 
     void on_window_change(const titan::WindowEvent& ev) {
         if (ev.type == titan::WindowEventType::Closed) {
-            std::cout << "[ipc] window closed: addr=" << ev.addr << "\n";
+            TITAN_DEBUG_LOG("[ipc] window closed: addr=" << ev.addr << "\n");
             enforcer_->remove_dgpu_window(ev.addr);
             return;
         }
 
-        std::cout << "[ipc] active window: " << ev.wm_class << " (" << ev.title << ") addr=" << ev.addr << "\n";
+        TITAN_DEBUG_LOG("[ipc] active window: " << ev.wm_class << " (" << ev.title << ") addr=" << ev.addr << "\n");
         active_app_ = ev.wm_class;
 
         titan::EnforcementResult result;
@@ -302,7 +303,7 @@ private:
             }
             manual_override_ = target;
             manual_override_active_ = (target != titan::GpuTarget::Auto);
-            auto result = enforcer_->enforce_target(target);
+            auto result = enforcer_->enforce_target(target, /*idempotent=*/true);
             current_target_ = result.target;
             return std::string("set -> ") + titan::Classifier::target_to_string(target) + "\n";
         }
@@ -397,10 +398,10 @@ private:
 
         // On saver profile, force iGPU when no explicit dGPU client
         if (profile == "saver" && !enforcer_->has_active_dgpu_clients()) {
-            enforcer_->enforce_target(titan::GpuTarget::IGPU);
+            enforcer_->enforce_target(titan::GpuTarget::IGPU, /*idempotent=*/true);
             current_target_ = titan::GpuTarget::IGPU;
         } else if (profile == "performance" && !manual_override_active_) {
-            enforcer_->enforce_target(titan::GpuTarget::DGPU);
+            enforcer_->enforce_target(titan::GpuTarget::DGPU, /*idempotent=*/true);
             current_target_ = titan::GpuTarget::DGPU;
         }
 
