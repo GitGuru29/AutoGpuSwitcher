@@ -1,0 +1,17 @@
+[Unit]
+Description=Auto GPU Switcher - workload-based Intel/NVIDIA switching
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/lib/autogpuswitcher/gpu_auto_switcher.py
+# The switcher may need root for prime-select/bbswitch fallback paths.
+# When the Titan daemon is running, no root is needed (it delegates via IPC).
+# Uncomment the next line if NOT using the Titan daemon:
+# User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
