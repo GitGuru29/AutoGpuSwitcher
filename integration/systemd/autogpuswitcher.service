@@ -1,5 +1,9 @@
 [Unit]
 Description=Auto GPU Switcher - workload-based Intel/NVIDIA switching
+# DEPRECATED: Workload analysis is now built into the Titan daemon
+# (titan-gpu-switcherd). This timer is only needed as a fallback when
+# running WITHOUT the Titan daemon (e.g., non-Hyprland setups).
+# On Archtitn OS (Hyprland-only), disable this and use the daemon.
 After=graphical-session.target
 Wants=graphical-session.target
 

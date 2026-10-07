@@ -20,6 +20,7 @@
 #include "power_manager.hpp"
 #include "state_writer.hpp"
 #include "workload_classifier.hpp"
+#include "workload_analyzer.hpp"
 
 static std::atomic<bool> g_running{true};
 static std::atomic<bool> g_reload{false};
@@ -71,6 +72,22 @@ public:
             on_window_change(ev);
         });
 
+        // Initialize workload analyzer (replaces Python gpu_auto_switcher.py)
+        std::string hist_path;
+        if (const char* env = std::getenv("TITAN_HISTORY_PATH")) {
+            hist_path = env;
+        } else if (std::filesystem::exists("/var/lib/autogpuswitcher")) {
+            hist_path = "/var/lib/autogpuswitcher/workload_history.dat";
+        } else {
+            // Per-user fallback
+            const char* home = std::getenv("HOME");
+            hist_path = std::string(home ? home : "/tmp") +
+                        "/.titan-gpu/workload_history.dat";
+            std::filesystem::create_directories(
+                std::filesystem::path(hist_path).parent_path());
+        }
+        workload_ = std::make_unique<titan::WorkloadAnalyzer>(hist_path);
+
         state_writer_.write(detector_, power_, current_target_, active_app_);
         return true;
     }
@@ -79,6 +96,8 @@ public:
         std::cout << "[daemon] running (pid=" << getpid() << ")\n";
 
         auto last_activity = std::chrono::steady_clock::now();
+        auto last_workload_scan = std::chrono::steady_clock::now() -
+                                  std::chrono::hours(1);  // scan immediately
         auto& cfg = titan::Config::instance();
 
         while (g_running) {
@@ -91,6 +110,15 @@ public:
             }
 
             ipc_.poll(500);
+
+            // Workload-based auto-switching (runs every 5 minutes)
+            auto now = std::chrono::steady_clock::now();
+            auto since_scan = std::chrono::duration_cast<std::chrono::seconds>(
+                now - last_workload_scan).count();
+            if (since_scan >= 300) {
+                last_workload_scan = now;
+                run_workload_cycle();
+            }
 
             if (enforcer_->has_active_dgpu_clients()) {
                 last_activity = std::chrono::steady_clock::now();
@@ -112,6 +140,55 @@ public:
     }
 
 private:
+    // Periodic workload analysis cycle (replaces Python gpu_auto_switcher.py)
+    void run_workload_cycle() {
+        if (!workload_) return;
+
+        int tracked = workload_->scan_processes();
+        titan::GpuTarget decision = workload_->analyze();
+        titan::GpuTarget tod = workload_->predict_time_of_day();
+
+        std::cout << "[workload] tracked=" << tracked
+                  << " decision=" << titan::Classifier::target_to_string(decision)
+                  << " tod=" << titan::Classifier::target_to_string(tod)
+                  << "\n";
+
+        // Time-of-day breaks ties when workload window is inconclusive
+        if (decision == titan::GpuTarget::Auto &&
+            tod != titan::GpuTarget::Auto) {
+            decision = tod;
+            std::cout << "[workload] using time-of-day: "
+                      << titan::Classifier::target_to_string(decision) << "\n";
+        }
+
+        // Power-aware bias: on battery with high drain, prefer iGPU
+        if (decision == titan::GpuTarget::Auto &&
+            workload_->on_ac_power() == 0) {
+            double drain = workload_->drain_rate_watts();
+            if (drain > 25.0) {
+                decision = titan::GpuTarget::IGPU;
+                std::cout << "[workload] battery drain " << drain
+                          << "W > 25W, biasing to iGPU\n";
+            }
+        }
+
+        // Don't override manual overrides or active window enforcement
+        if (manual_override_active_) return;
+        if (enforcer_->has_active_dgpu_clients()) return;
+
+        if (decision == titan::GpuTarget::DGPU &&
+            current_target_ != titan::GpuTarget::DGPU) {
+            auto result = enforcer_->enforce_target(titan::GpuTarget::DGPU);
+            current_target_ = result.target;
+            std::cout << "[workload] switched to dGPU\n";
+        } else if (decision == titan::GpuTarget::IGPU &&
+                   current_target_ != titan::GpuTarget::IGPU) {
+            auto result = enforcer_->enforce_target(titan::GpuTarget::IGPU);
+            current_target_ = result.target;
+            std::cout << "[workload] switched to iGPU\n";
+        }
+    }
+
     void on_window_change(const titan::WindowEvent& ev) {
         if (ev.type == titan::WindowEventType::Closed) {
             std::cout << "[ipc] window closed: addr=" << ev.addr << "\n";
@@ -263,6 +340,17 @@ private:
             return "error: invalid profile (balanced, saver, performance)\n";
         }
 
+        if (cmd == "workload") {
+            if (workload_) return workload_->status_report();
+            return "error: workload analyzer not initialized\n";
+        }
+
+        if (cmd == "workload-rescan") {
+            if (!workload_) return "error: workload analyzer not initialized\n";
+            int n = workload_->scan_processes();
+            return "scanned " + std::to_string(n) + " processes\n";
+        }
+
         return "error: unknown command\n";
     }
 
@@ -340,6 +428,7 @@ private:
     std::unique_ptr<titan::GpuEnforcer> enforcer_;
     titan::HyprlandIpcBridge ipc_;
     titan::StateWriter state_writer_;
+    std::unique_ptr<titan::WorkloadAnalyzer> workload_;
 
     titan::GpuTarget current_target_ = titan::GpuTarget::Auto;
     std::string active_app_;

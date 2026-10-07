@@ -18,7 +18,11 @@ namespace titan {
 
 static std::string get_socket_path() {
     const char* env = std::getenv("TITAN_SOCKET_PATH");
-    return env ? std::string(env) : "/tmp/titan-gpu-daemon.sock";
+    if (env) return std::string(env);
+    if (std::filesystem::exists("/run/titan-gpu/daemon.sock")) {
+        return "/run/titan-gpu/daemon.sock";
+    }
+    return "/tmp/titan-gpu-daemon.sock";
 }
 
 static bool send_command(const std::string& cmd) {
@@ -59,6 +63,8 @@ static void print_usage() {
               << "  set <igpu|dgpu|auto>  Manual GPU override\n"
               << "  power <on|off|auto>   Force dGPU power state\n"
               << "  profile <name>        Switch power profile\n"
+              << "  workload             Show workload analysis status\n"
+              << "  workload-rescan      Force immediate /proc scan\n"
               << "  reload                Reload daemon config\n"
               << "\n";
 }
@@ -128,6 +134,22 @@ int cli_main(int argc, char** argv) {
     if (cmd == "profile" && argc >= 3) {
         std::string msg = "profile " + std::string(argv[2]) + "\n";
         if (!send_command(msg)) {
+            std::cerr << "failed to communicate with daemon\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    if (cmd == "workload") {
+        if (!send_command("workload\n")) {
+            std::cerr << "failed to communicate with daemon\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    if (cmd == "workload-rescan") {
+        if (!send_command("workload-rescan\n")) {
             std::cerr << "failed to communicate with daemon\n";
             return 1;
         }
