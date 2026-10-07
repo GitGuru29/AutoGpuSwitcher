@@ -11,6 +11,8 @@ Restart=on-failure
 RestartSec=3
 RuntimeDirectory=titan-gpu
 Environment=TITAN_SOCKET_PATH=/run/titan-gpu/daemon.sock
+Environment=TITAN_STATE_PATH=/run/titan-gpu/state.json
+Environment=TITAN_HISTORY_PATH=/var/lib/autogpuswitcher/workload_history.dat
 
 [Install]
 WantedBy=graphical-session.target

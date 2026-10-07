@@ -14,6 +14,7 @@ add_executable(titan-gpu-switcherd
     src/gpu_enforcer.cpp
     src/hyprland_ipc_bridge.cpp
     src/state_writer.cpp
+    src/workload_analyzer.cpp
     src/cli.cpp
 )
 

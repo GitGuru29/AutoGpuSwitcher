@@ -23,7 +23,15 @@ STATE_DIR = os.path.expanduser("~/.gpu-auto-switcher")
 GPU_HISTORY = os.path.join(STATE_DIR, "history.json")
 LOGFILE = os.path.join(STATE_DIR, "gpu-switcher.log")
 POWER_HISTORY = os.path.join(STATE_DIR, "power_history.json")
-TITAN_SOCKET = os.environ.get("TITAN_SOCKET_PATH", "/tmp/titan-gpu-daemon.sock")
+# Check systemd RuntimeDirectory path first, then legacy /tmp fallback
+TITAN_SOCKET = os.environ.get("TITAN_SOCKET_PATH")
+if not TITAN_SOCKET:
+    for _p in ("/run/titan-gpu/daemon.sock", "/tmp/titan-gpu-daemon.sock"):
+        if os.path.exists(_p):
+            TITAN_SOCKET = _p
+            break
+    else:
+        TITAN_SOCKET = "/run/titan-gpu/daemon.sock"
 
 # Recent-workload analysis window (seconds)
 ANALYSIS_WINDOW_SEC = 600
@@ -79,8 +87,8 @@ def save_history(data):
         log("save_history error: {}".format(e))
 
 
-def update_history(process, gpu):
-    history = load_history()
+def update_history(history, process, gpu):
+    """Mutate `history` dict in place. Caller is responsible for save_history()."""
     now_iso = datetime.now().isoformat()
     if process in history:
         entry = history[process]
@@ -98,7 +106,6 @@ def update_history(process, gpu):
             "last_seen": now_iso,
             "observations": [{"gpu": gpu, "time": now_iso}],
         }
-    save_history(history)
 
 
 # ---------------------------------------------------------------------------
@@ -356,14 +363,31 @@ def detect_process_gpu(pid, nvidia_pids):
     except OSError:
         return "intel"
 
-    if any(w in cmdline for w in OFFLOAD_WRAPPER_KEYWORDS):
-        return "nvidia"
+    return _classify_cmdline(pid, nvidia_pids, cmdline)
 
-    app_name = cmdline.split()[0] if cmdline else ""
+
+def detect_process_gpu_with_cmdline(pid, nvidia_pids, cmdline_lower):
+    """Classify a PID using an already-read cmdline (avoids double /proc read)."""
+    if pid in nvidia_pids:
+        return "nvidia"
+    try:
+        with open("/proc/{}/environ".format(pid), "rb") as f:
+            env = f.read().decode("utf-8", errors="ignore")
+        if "__NV_PRIME_RENDER_OFFLOAD" in env or \
+           "__VK_LAYER_NV_optimus" in env:
+            return "nvidia"
+    except OSError:
+        pass
+    return _classify_cmdline(pid, nvidia_pids, cmdline_lower)
+
+
+def _classify_cmdline(pid, nvidia_pids, cmdline_lower):
+    if any(w in cmdline_lower for w in OFFLOAD_WRAPPER_KEYWORDS):
+        return "nvidia"
+    app_name = cmdline_lower.split()[0] if cmdline_lower else ""
     base = os.path.basename(app_name)
     if any(kw in base for kw in HEAVY_KEYWORDS):
         return "nvidia"
-
     return "intel"
 
 
@@ -519,7 +543,8 @@ def switch_gpu(target):
 
     if target == "intel":
         if shutil.which("prime-select"):
-            ret = os.system("prime-select intel 2>/dev/null")
+            ret = subprocess.run(["prime-select", "intel"],
+                                 capture_output=True).returncode
             log("prime-select intel returned: {}".format(ret))
             success = (ret == 0)
         try:
@@ -529,12 +554,15 @@ def switch_gpu(target):
             success = True
         except OSError as e:
             log("bbswitch off error: {}".format(e))
-        os.system("xrandr --setprovideroffloadsources intel NVIDIA-0 "
-                  "2>/dev/null")
+        # xrandr only works on X11; skip silently on Wayland/Hyprland
+        if os.environ.get("XDG_SESSION_TYPE") == "x11" and shutil.which("xrandr"):
+            subprocess.run(["xrandr", "--setprovideroffloadsources",
+                            "intel", "NVIDIA-0"], capture_output=True)
 
     elif target == "nvidia":
         if shutil.which("prime-select"):
-            ret = os.system("prime-select nvidia 2>/dev/null")
+            ret = subprocess.run(["prime-select", "nvidia"],
+                                 capture_output=True).returncode
             log("prime-select nvidia returned: {}".format(ret))
             success = (ret == 0)
         try:
@@ -544,8 +572,9 @@ def switch_gpu(target):
             success = True
         except OSError as e:
             log("bbswitch on error: {}".format(e))
-        os.system("xrandr --setprovideroutputsource modesetting NVIDIA-0 "
-                  "2>/dev/null")
+        if os.environ.get("XDG_SESSION_TYPE") == "x11" and shutil.which("xrandr"):
+            subprocess.run(["xrandr", "--setprovideroutputsource",
+                            "modesetting", "NVIDIA-0"], capture_output=True)
 
     time.sleep(1)
     return success
@@ -558,17 +587,25 @@ def get_process_age_sec(pid):
     """Return process age in seconds, or None on error."""
     try:
         with open("/proc/{}/stat".format(pid), "r") as f:
-            fields = f.read().split()
-        if len(fields) < 22:
+            raw = f.read()
+        # Parse from the last ')' — comm field may contain spaces/parens
+        rparen = raw.rfind(")")
+        if rparen < 0:
             return None
-        starttime_jiffies = int(fields[21])
+        fields = raw[rparen + 1:].split()
+        # After removing pid+comm, starttime is at index 19 (was 21 with pid+comm)
+        if len(fields) < 20:
+            return None
+        starttime_jiffies = int(fields[19])
         hertz = os.sysconf("SC_CLK_TCK") or 100
-        uptime_sec = time.time()
+        # Read actual system uptime (seconds since boot), not epoch time
+        with open("/proc/uptime", "r") as f:
+            uptime_sec = float(f.read().split()[0])
         # starttime is in jiffies since boot; convert to seconds
         start_sec = starttime_jiffies / hertz
         age = uptime_sec - start_sec
         return max(0.0, age)
-    except (OSError, ValueError):
+    except (OSError, ValueError, IndexError):
         return None
 
 
@@ -582,6 +619,10 @@ def track_processes():
     except OSError as e:
         log("listdir /proc error: {}".format(e))
         return
+
+    # Load history ONCE, mutate in memory, save once at the end
+    # (was: load+save per PID = O(N) full JSON rewrites per cycle)
+    history = load_history()
 
     for pid_dir in pid_dirs:
         if not pid_dir.isdigit():
@@ -608,27 +649,34 @@ def track_processes():
                 "rcu_", "irq/", "idle_inject")):
             continue
 
-        # Age filter — skip short-lived processes
+        # Age filter — skip short-lived processes (requires fixed epoch-vs-boot bug)
         age = get_process_age_sec(pid)
         if age is None or age < MIN_PROCESS_AGE_SEC:
             continue
 
-        # Detect GPU
-        process_gpu = detect_process_gpu(pid, nvidia_pids)
-
-        # Build process key from cmdline (first 50 chars)
+        # Read cmdline ONCE — use for both GPU detection and process key
+        # (was: read twice, once in detect_process_gpu and once here)
         try:
             with open("/proc/{}/cmdline".format(pid), "rb") as f:
-                proc_name = (f.read()
-                             .replace(b"\x00", b" ")
-                             .decode("utf-8", errors="ignore")[:50]
-                             .strip())
+                cmdline_raw = f.read()
+            cmdline = cmdline_raw.replace(b"\x00", b" ").decode(
+                "utf-8", errors="ignore")
         except OSError:
-            proc_name = "unknown"
-        if not proc_name:
+            cmdline = ""
+        if not cmdline.strip():
             continue
 
-        update_history(proc_name, process_gpu)
+        # Detect GPU (pass cmdline to avoid re-reading /proc)
+        process_gpu = detect_process_gpu_with_cmdline(
+            pid, nvidia_pids, cmdline.lower())
+
+        # Build process key from cmdline (first 50 chars)
+        proc_name = cmdline[:50].strip()
+
+        update_history(history, proc_name, process_gpu)
+
+    # Save once after the loop
+    save_history(history)
 
 
 # ---------------------------------------------------------------------------
@@ -720,7 +768,8 @@ def run_subcommand(argv):
         if not os.path.exists(scan_script):
             scan_script = "/usr/lib/autogpuswitcher/initial_scan.sh"
         if os.path.exists(scan_script):
-            ret = os.system("bash '{}' --yes 2>&1".format(scan_script))
+            ret = subprocess.run(["bash", scan_script, "--yes"],
+                                 capture_output=True).returncode
             log("initial_scan.sh exited: {}".format(ret))
         else:
             log("ERROR: initial_scan.sh not found. "
@@ -740,7 +789,8 @@ def run_subcommand(argv):
         if not os.path.exists(gen_script):
             gen_script = "/usr/lib/autogpuswitcher/generate_desktop_entries.sh"
         if os.path.exists(gen_script):
-            ret = os.system("bash '{}' 2>&1".format(gen_script))
+            ret = subprocess.run(["bash", gen_script],
+                                 capture_output=True).returncode
             log("desktop generator exited: {}".format(ret))
         else:
             log("ERROR: generate_desktop_entries.sh not found.")
