@@ -35,6 +35,8 @@ private:
     std::string find_socket_path();
 
     int fd_ = -1;
+    int reconnect_cooldown_ = 0;
+    std::string pending_;  // partial-line buffer across recv calls
     WindowCallback callback_;
 };
 

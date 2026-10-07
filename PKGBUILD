@@ -86,10 +86,6 @@ package() {
         "$pkgdir/etc/titan-gpu/config"
 
     # --- Systemd units ---
-    install -Dm644 integration/systemd/autogpuswitcher.service \
-        "$pkgdir/usr/lib/systemd/system/autogpuswitcher.service"
-    install -Dm644 integration/systemd/autogpuswitcher.timer \
-        "$pkgdir/usr/lib/systemd/system/autogpuswitcher.timer"
     install -Dm644 integration/systemd/titan-gpu-switcherd.service \
         "$pkgdir/usr/lib/systemd/system/titan-gpu-switcherd.service"
 

@@ -83,9 +83,11 @@ for package_name in "$@"; do
 
     if (( record_matches )); then
         AUTOGPUSWITCHER_PACKAGE_NAME="${package_name}" \
+            AUTOGPUSWITCHER_SKIP_ELF_CHECK=1 \
             "${SCRIPT_DIR}/analyze_binary.sh" --record "${binaries[@]}" >/dev/null
     else
         AUTOGPUSWITCHER_PACKAGE_NAME="${package_name}" \
+            AUTOGPUSWITCHER_SKIP_ELF_CHECK=1 \
             "${SCRIPT_DIR}/analyze_binary.sh" "${binaries[@]}"
     fi
 done

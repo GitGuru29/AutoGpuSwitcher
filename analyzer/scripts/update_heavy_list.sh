@@ -39,4 +39,15 @@ else
     done
 fi
 
-grep -vE '^\s*($|#)' "${tmp_file}" | LC_ALL=C sort -u > "${HEAVY_LIST_FILE}"
+# Atomic write with flock: readers (interceptor, launcher) must never see
+# a truncated/empty list while the pacman hook is mid-write.
+final_tmp="${HEAVY_LIST_FILE}.new"
+grep -vE '^\s*($|#)' "${tmp_file}" | LC_ALL=C sort -u > "${final_tmp}"
+if command -v flock >/dev/null 2>&1; then
+    (
+        flock -x 9
+        mv -f "${final_tmp}" "${HEAVY_LIST_FILE}"
+    ) 9>"${HEAVY_LIST_FILE}.lock"
+else
+    mv -f "${final_tmp}" "${HEAVY_LIST_FILE}"
+fi

@@ -56,8 +56,12 @@ binary_uses_heavy_libs() {
     return 1
 }
 
+# Skip ELF check when caller (analyze_package.sh) already validated —
+# avoids running `file` twice per binary (was: 2x file + 2x ldd per binary)
+skip_elf_check="${AUTOGPUSWITCHER_SKIP_ELF_CHECK:-0}"
+
 for binary_path in "$@"; do
-    if ! is_elf_executable "${binary_path}"; then
+    if [[ "${skip_elf_check}" != "1" ]] && ! is_elf_executable "${binary_path}"; then
         continue
     fi
 

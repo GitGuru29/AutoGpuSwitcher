@@ -638,18 +638,9 @@ def track_processes():
         except OSError:
             continue
 
-        # Skip known system threads
-        try:
-            with open("/proc/{}/comm".format(pid), "r") as f:
-                comm = f.read().strip()
-        except OSError:
-            continue
-        if any(comm.startswith(kw) for kw in
-               ("kworker", "ksoftirqd", "migration", "watchdog",
-                "rcu_", "irq/", "idle_inject")):
-            continue
-
-        # Age filter — skip short-lived processes (requires fixed epoch-vs-boot bug)
+        # Age filter — skip short-lived processes
+        # (kernel threads like kworker are already excluded: they're
+        #  root-owned, so the uid check above skips them)
         age = get_process_age_sec(pid)
         if age is None or age < MIN_PROCESS_AGE_SEC:
             continue

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -60,13 +61,13 @@ void HyprlandIpcBridge::disconnect() {
 
 bool HyprlandIpcBridge::poll(int timeout_ms) {
     if (fd_ < 0) {
-        static int reconnect_cooldown = 0;
-        if (reconnect_cooldown-- > 0) return false;
+        if (reconnect_cooldown_-- > 0) return false;
         if (connect()) {
             std::cout << "[hyprland_ipc] reconnected\n";
-            reconnect_cooldown = 0;
+            reconnect_cooldown_ = 0;
+            pending_.clear();
         } else {
-            reconnect_cooldown = 10;
+            reconnect_cooldown_ = 10;
         }
         return false;
     }
@@ -82,23 +83,43 @@ bool HyprlandIpcBridge::poll(int timeout_ms) {
     int ret = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
     if (ret <= 0) return false;
 
+    // Drain until EAGAIN (was: single 4KB read per poll, could miss events)
+    bool got_data = false;
     std::array<char, 4096> buf{};
-    ssize_t n = recv(fd_, buf.data(), buf.size() - 1, MSG_DONTWAIT);
-    if (n <= 0) return false;
+    while (true) {
+        ssize_t n = recv(fd_, buf.data(), buf.size() - 1, MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            // Real error — close and mark for reconnect
+            disconnect();
+            return false;
+        }
+        if (n == 0) {
+            // Peer closed (compositor restart) — mark for reconnect.
+            // Was: returned false while fd_ >= 0, so reconnect branch
+            // was never entered and window tracking died permanently.
+            std::cerr << "[hyprland_ipc] connection closed by peer\n";
+            disconnect();
+            return false;
+        }
+        got_data = true;
+        pending_.append(buf.data(), static_cast<size_t>(n));
+    }
 
-    std::string data(buf.data(), static_cast<size_t>(n));
+    if (!got_data) return false;
 
+    // Process complete lines; carry partial line to next poll
     size_t pos = 0;
-    while (pos < data.size()) {
-        auto nl = data.find('\n', pos);
-        if (nl == std::string::npos) nl = data.size();
-        auto event = data.substr(pos, nl - pos);
+    while (true) {
+        auto nl = pending_.find('\n', pos);
+        if (nl == std::string::npos) break;
+        auto event = pending_.substr(pos, nl - pos);
         pos = nl + 1;
-
         if (!event.empty()) {
             parse_event(event);
         }
     }
+    pending_.erase(0, pos);  // keep incomplete tail
 
     return true;
 }

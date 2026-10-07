@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-
-set -euo pipefail
+# Library of shared functions. This file is SOURCED, not executed.
+# Do NOT set -euo pipefail here — it would change strictness for every
+# sourcing script (including tests/run_all_scenarios.sh which uses set -u only).
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
@@ -25,7 +26,10 @@ ensure_state_dirs() {
 }
 
 read_heavy_lib_patterns() {
-    grep -vE '^\s*($|#)' "${HEAVY_LIBS_FILE}"
+    # grep exits 1 when config is all comments/blank — must not abort
+    # callers running under set -e (they'd get an empty pattern array
+    # and silently classify every binary as "not heavy")
+    grep -vE '^\s*($|#)' "${HEAVY_LIBS_FILE}" || true
 }
 
 normalize_app_name() {

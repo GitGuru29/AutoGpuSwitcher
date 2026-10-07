@@ -25,25 +25,6 @@ jobs:
       - name: Lint test runner
         run: shellcheck -S error tests/run_all_scenarios.sh || true
 
-  lint-python:
-    name: Python Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install ruff
-        run: pip install ruff
-
-      - name: Lint Python scripts
-        run: ruff check gpu_auto_switcher.py integration/ || true
-
-      - name: Syntax check
-        run: python3 -m py_compile gpu_auto_switcher.py
-
   build-and-test:
     name: Build & Test (${{ matrix.compiler }})
     runs-on: ubuntu-latest
@@ -77,6 +58,9 @@ jobs:
       - name: Run scenario tests
         run: bash tests/run_all_scenarios.sh
 
+      - name: Steam validation (quick)
+        run: bash tests/validate_steam.sh --quick || true
+
   validate-integration:
     name: Integration Assets
     runs-on: ubuntu-latest
@@ -86,12 +70,10 @@ jobs:
       - name: Validate systemd units
         run: |
           for f in integration/systemd/*.service integration/systemd/*.timer; do
+            [[ -f "$f" ]] || continue
             echo "Checking $f ..."
             systemd-analyze verify "$f" 2>&1 | grep -v "not found" || true
           done
-
-      - name: Validate Python script runs
-        run: python3 gpu_auto_switcher.py 2>&1 | head -5 || true
 
       - name: Check all required files exist
         run: |
@@ -108,12 +90,15 @@ jobs:
             "interceptor/src/main.cpp"
             "interceptor/CMakeLists.txt"
             "subsystems/auto-gpu-switcher/CMakeLists.txt"
-            "integration/systemd/autogpuswitcher.timer"
+            "subsystems/auto-gpu-switcher/src/workload_analyzer.cpp"
+            "subsystems/auto-gpu-switcher/include/workload_analyzer.hpp"
+            "subsystems/auto-gpu-switcher/include/debug_log.hpp"
             "integration/systemd/titan-gpu-switcherd.service"
             "integration/shell/bash_aliases.sh"
             "integration/desktop/generate_desktop_entries.sh"
-            "gpu_auto_switcher.py"
             "tests/run_all_scenarios.sh"
+            "tests/validate_steam.sh"
+            "PKGBUILD"
           )
           for f in "${required[@]}"; do
             if [[ -f "$f" ]]; then
@@ -122,4 +107,16 @@ jobs:
               echo "MISS $f"
               exit 1
             fi
+          done
+
+          # Removed Python timer units must not come back — workload
+          # analysis lives in titan-gpu-switcherd now.
+          for removed in \
+            "integration/systemd/autogpuswitcher.service" \
+            "integration/systemd/autogpuswitcher.timer"; do
+            if [[ -f "$removed" ]]; then
+              echo "UNEXPECTED $removed (deprecated, must not ship)"
+              exit 1
+            fi
+            echo "GONE $removed"
           done
