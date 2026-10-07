@@ -10,6 +10,7 @@ ExecStart=/usr/bin/python3 /usr/lib/autogpuswitcher/gpu_auto_switcher.py
 # When the Titan daemon is running, no root is needed (it delegates via IPC).
 # Uncomment the next line if NOT using the Titan daemon:
 # User=root
+Environment=TITAN_SOCKET_PATH=/run/titan-gpu/daemon.sock
 StandardOutput=journal
 StandardError=journal
 

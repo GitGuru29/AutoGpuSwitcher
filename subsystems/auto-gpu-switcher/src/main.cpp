@@ -1,4 +1,5 @@
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <signal.h>
 #include <unistd.h>
@@ -30,7 +31,12 @@ static void handle_signal(int sig) {
 
 static std::string get_socket_path() {
     const char* env = std::getenv("TITAN_SOCKET_PATH");
-    return env ? std::string(env) : "/tmp/titan-gpu-daemon.sock";
+    if (env) return std::string(env);
+    // Prefer systemd RuntimeDirectory; fall back to /tmp only if /run unavailable
+    if (std::filesystem::exists("/run/titan-gpu")) {
+        return "/run/titan-gpu/daemon.sock";
+    }
+    return "/tmp/titan-gpu-daemon.sock";
 }
 
 class Daemon {
@@ -150,6 +156,9 @@ private:
             return false;
         }
 
+        // Restrict socket access: owner rw, group r — prevents world-writable IPC
+        ::chmod(socket_path.c_str(), 0660);
+
         if (listen(listen_fd_, 5) < 0) {
             std::cerr << "[daemon] listen() failed: " << std::strerror(errno) << "\n";
             close(listen_fd_);
@@ -177,6 +186,18 @@ private:
 
         int client_fd = accept(listen_fd_, nullptr, nullptr);
         if (client_fd < 0) return;
+
+        // Verify client credentials: only root or same UID may send commands
+        struct ucred cred{};
+        socklen_t cred_len = sizeof(cred);
+        if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
+            if (cred.uid != 0 && cred.uid != getuid()) {
+                const char* denied = "error: permission denied\n";
+                send(client_fd, denied, strlen(denied), 0);
+                close(client_fd);
+                return;
+            }
+        }
 
         char buf[256]{};
         ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);

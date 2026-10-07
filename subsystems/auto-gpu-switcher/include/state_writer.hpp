@@ -20,6 +20,7 @@ public:
 
 private:
     static const char* power_source_str(PowerSource ps);
+    std::string last_content_;
 };
 
 }  // namespace titan
