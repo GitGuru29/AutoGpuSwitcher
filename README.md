@@ -1,63 +1,165 @@
 # AutoGpuSwitcher
 
-Automatic GPU selection scaffold for Arch Linux.
+Automatic GPU selection for Arch Linux hybrid graphics (Intel iGPU + NVIDIA dGPU).
 
-## Phase 1
+AutoGpuSwitcher detects GPU-heavy applications, routes them to the discrete GPU,
+and automatically powers the dGPU on/off based on workload patterns — saving
+battery life without manual intervention.
 
-Phase 1 implements the detection pipeline:
+## Architecture
 
-- a `pacman` hook that reacts to package installs and upgrades
-- a shell analyzer that inspects ELF executables with `ldd`
-- a first-run scan for applications installed before AutoGpuSwitcher
-- persistent state in `state/heavy_apps.list`
-- installable pacman hook assets for system deployment
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    AutoGpuSwitcher                              │
+│                                                                 │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐    │
+│  │  Phase 1     │   │  Phase 2     │   │  Phase 3         │    │
+│  │  Detection   │──►│  Interceptor │──►│  Integration     │    │
+│  │  Pipeline    │   │  Launcher    │   │  Desktop/Shell   │    │
+│  └──────────────┘   └──────────────┘   │  Systemd         │    │
+│        │                                └──────────────────┘    │
+│        ▼                                       │                │
+│  heavy_apps.list ──────────────────────────────┘                │
+│        │                                                        │
+│        ▼                                                        │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Titan Daemon (subsystems/)                              │   │
+│  │  • Hyprland IPC window tracking                          │   │
+│  │  • PCI runtime power management                          │   │
+│  │  • AC/Battery power heuristics                           │   │
+│  │  • Unix socket CLI (titan-gpu)                           │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│        ▲                                                        │
+│        │  IPC delegation                                        │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  gpu_auto_switcher.py (workload history)                 │   │
+│  │  • /proc scanning + nvidia-smi polling                   │   │
+│  │  • Per-process GPU usage history                         │   │
+│  │  • Time-of-day workload patterns                         │   │
+│  │  • Auto-switch via Titan daemon → prime-select fallback  │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-Heavy applications are detected by matching linked libraries against
-[`analyzer/config/heavy_libs.conf`](./analyzer/config/heavy_libs.conf).
-The scan ignores debug payloads and shared-library artifacts so it focuses on
-launchable executables.
+## Phases
+
+### Phase 1: Detection Pipeline (Bash)
+- **pacman hook** — triggers on every package install/upgrade
+- **ELF analyzer** — `ldd` + library matching against `heavy_libs.conf`
+- **First-run scan** — scans all pre-installed packages
+- **Persistent state** — `state/heavy_apps.list` (`pkg|app|/path`)
+
+### Phase 2: Launch Interceptor (C++17)
+- **`autogpuswitcher-launcher`** — wraps app execution
+- Reads `heavy_apps.list`, applies NVIDIA PRIME env vars for heavy apps
+- Supports `--force-dgpu`, `--dry-run` flags
+- Logs every decision to `/tmp/autogpuswitcher-launcher.log`
+
+### Phase 3: System Integration
+- **Desktop** — generates `.desktop` entries for heavy apps
+- **Shell** — Bash/Fish aliases + universal `autogpu-run` wrapper
+- **Systemd** — timer for auto-switcher + daemon service
+
+### Titan Daemon (C++17, independent subsystem)
+- Monitors Hyprland window focus via IPC
+- Powers dGPU on/off per window with reference counting
+- AC/Battery power heuristics (`auto` → iGPU on battery, dGPU on AC)
+- `titan-gpu` CLI over unix socket
+- Waybar status module included
+- 68 GTest tests
+
+### Workload Auto-Switcher (Python 3)
+- Scans `/proc` for user processes with GPU activity
+- Polls `nvidia-smi` for real utilization + compute app PIDs
+- Tracks per-process GPU usage history (rolling 100 observations)
+- Learns time-of-day patterns for predictive switching
+- Delegates to Titan daemon via IPC (falls back to prime-select/bbswitch)
+- Runs via systemd timer every 5 minutes
+
+## Quick Start
+
+```bash
+# 1. Build everything
+cmake -B build -S subsystems/auto-gpu-switcher && cmake --build build
+cmake -B interceptor/build -S interceptor && cmake --build interceptor/build
+
+# 2. Run tests
+./build/titan-gpu-tests
+bash tests/run_all_scenarios.sh
+
+# 3. Install system-wide
+sudo ./setup/install_phase1.sh
+
+# 4. Initial scan of existing packages
+sudo ./setup/first_run.sh --yes --verbose
+
+# 5. Enable auto-switching timer
+sudo systemctl enable --now autogpuswitcher.timer
+
+# 6. Start the Titan daemon (for window-based power management)
+sudo systemctl enable --now titan-gpu-switcherd
+
+# 7. Verify
+autogpuswitcher-launcher --dry-run glxinfo
+titan-gpu status
+```
 
 ## Key Entrypoints
 
-- `setup/first_run.sh`: prompts for the initial scan
-- `setup/install_phase1.sh`: installs the hook and analyzer under `/usr/lib/autogpuswitcher`
-- `analyzer/scripts/initial_scan.sh`: rebuilds the heavy app list
-- `analyzer/scripts/analyze_package.sh`: analyzes pacman-owned files
-- `analyzer/scripts/analyze_binary.sh`: analyzes specific ELF binaries
-- `pacman-hook/post_transaction.sh`: hook entrypoint for new installs
+| Command | Purpose |
+|---------|---------|
+| `setup/first_run.sh` | Initial heavy-app scan |
+| `setup/install_phase1.sh` | System-wide install (all phases) |
+| `autogpuswitcher-launcher` | Launch app with dGPU offload |
+| `titan-gpu status` | Show GPU/daemon status |
+| `titan-gpu set igpu\|dgpu\|auto` | Manual GPU switch |
+| `titan-gpu profile balanced\|saver\|performance` | Power profile |
+| `python3 gpu_auto_switcher.py` | Run workload analysis cycle |
 
-## Runtime State
+## Configuration
 
-Runtime files are not meant to be committed:
+| File | Purpose |
+|------|---------|
+| `/etc/autogpuswitcher/autogpuswitcher.conf` | Analyzer paths and state |
+| `/etc/titan-gpu/config` | Titan daemon rules (INI) |
+| `analyzer/config/heavy_libs.conf` | GPU library patterns |
+| `state/heavy_apps.list` | Detected heavy apps |
 
-- `state/heavy_apps.list`
-- `state/first_run_complete`
-- `state/logs/*`
-- `state/cache/*`
-
-The heavy-app list now stores records as:
-
-```text
-package-name|app-name|/full/path/to/binary
-```
-
-## Install Phase 1 System-Wide
-
-Run this as root on Arch to install the hook and shell analyzer assets:
+## Testing
 
 ```bash
-sudo ./setup/install_phase1.sh
+# Full test suite (55 scenarios)
+bash tests/run_all_scenarios.sh
+
+# GTest unit tests (68 tests)
+./build/titan-gpu-tests
+
+# Sandbox test (mock sysfs + Hyprland)
+bash subsystems/auto-gpu-switcher/tests/sandbox_test.sh
+
+# Benchmark
+bash subsystems/auto-gpu-switcher/tests/benchmark.sh
 ```
 
-This installs:
+## Requirements
 
-- hook file to `/usr/share/libalpm/hooks/autogpuswitcher.hook`
-- project scripts to `/usr/lib/autogpuswitcher`
-- config to `/etc/autogpuswitcher/autogpuswitcher.conf`
-- writable runtime state to `/var/lib/autogpuswitcher`
+- Arch Linux (pacman, libalpm hooks)
+- NVIDIA proprietary driver with PRIME support
+- CMake ≥ 3.16, C++17 compiler (GCC or Clang)
+- GoogleTest (for tests)
+- Python 3 (stdlib only)
+- Hyprland (for Titan daemon window tracking)
+- Optional: Waybar (status module), bbswitch, prime-select
 
-After installation, run the initial scan:
+## Documentation
 
-```bash
-./setup/first_run.sh --yes --verbose
-```
+- [`docs/classification-mechanism.md`](docs/classification-mechanism.md) — full classification system reference
+- [`docs/architecture.md`](docs/architecture.md) — Phase 1 architecture
+- [`interceptor/README.md`](interceptor/README.md) — launcher build/usage
+- [`integration/systemd/README.md`](integration/systemd/README.md) — service setup
+- [`integration/shell/README.md`](integration/shell/README.md) — shell aliases
+- [`integration/desktop/README.md`](integration/desktop/README.md) — desktop entries
+
+## License
+
+Apache 2.0
