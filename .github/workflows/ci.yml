@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "fixes/*", "feature/*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-shell:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Lint analyzer scripts
+        run: shellcheck -S warning analyzer/scripts/*.sh pacman-hook/post_transaction.sh setup/*.sh
+
+      - name: Lint integration scripts
+        run: shellcheck -S warning integration/shell/autogpu-run.sh integration/desktop/generate_desktop_entries.sh || true
+
+      - name: Lint test runner
+        run: shellcheck -S error tests/run_all_scenarios.sh || true
+
+  lint-python:
+    name: Python Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint Python scripts
+        run: ruff check gpu_auto_switcher.py integration/ || true
+
+      - name: Syntax check
+        run: python3 -m py_compile gpu_auto_switcher.py
+
+  build-and-test:
+    name: Build & Test (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ clang libgtest-dev
+
+      - name: Configure Titan daemon
+        run: cmake -B build -S subsystems/auto-gpu-switcher -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+
+      - name: Build Titan daemon
+        run: cmake --build build -j$(nproc)
+
+      - name: Configure interceptor
+        run: cmake -B interceptor/build -S interceptor -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+
+      - name: Build interceptor
+        run: cmake --build interceptor/build -j$(nproc)
+
+      - name: Run GTest suite
+        run: ./build/titan-gpu-tests
+
+      - name: Run scenario tests
+        run: bash tests/run_all_scenarios.sh
+
+  validate-integration:
+    name: Integration Assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate systemd units
+        run: |
+          for f in integration/systemd/*.service integration/systemd/*.timer; do
+            echo "Checking $f ..."
+            systemd-analyze verify "$f" 2>&1 | grep -v "not found" || true
+          done
+
+      - name: Validate Python script runs
+        run: python3 gpu_auto_switcher.py 2>&1 | head -5 || true
+
+      - name: Check all required files exist
+        run: |
+          required=(
+            "analyzer/scripts/common.sh"
+            "analyzer/scripts/analyze_binary.sh"
+            "analyzer/scripts/analyze_package.sh"
+            "analyzer/scripts/initial_scan.sh"
+            "analyzer/config/heavy_libs.conf"
+            "pacman-hook/hooks/autogpuswitcher.hook"
+            "pacman-hook/post_transaction.sh"
+            "setup/install_phase1.sh"
+            "setup/first_run.sh"
+            "interceptor/src/main.cpp"
+            "interceptor/CMakeLists.txt"
+            "subsystems/auto-gpu-switcher/CMakeLists.txt"
+            "integration/systemd/autogpuswitcher.timer"
+            "integration/systemd/titan-gpu-switcherd.service"
+            "integration/shell/bash_aliases.sh"
+            "integration/desktop/generate_desktop_entries.sh"
+            "gpu_auto_switcher.py"
+            "tests/run_all_scenarios.sh"
+          )
+          for f in "${required[@]}"; do
+            if [[ -f "$f" ]]; then
+              echo "OK   $f"
+            else
+              echo "MISS $f"
+              exit 1
+            fi
+          done

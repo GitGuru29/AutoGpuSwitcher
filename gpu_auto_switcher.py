@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 STATE_DIR = os.path.expanduser("~/.gpu-auto-switcher")
 GPU_HISTORY = os.path.join(STATE_DIR, "history.json")
 LOGFILE = os.path.join(STATE_DIR, "gpu-switcher.log")
+POWER_HISTORY = os.path.join(STATE_DIR, "power_history.json")
 TITAN_SOCKET = os.environ.get("TITAN_SOCKET_PATH", "/tmp/titan-gpu-daemon.sock")
 
 # Recent-workload analysis window (seconds)
@@ -143,6 +144,193 @@ def get_nvidia_gpu_stats():
 
 def is_root():
     return os.geteuid() == 0
+
+
+# ---------------------------------------------------------------------------
+# Power consumption monitoring (battery drain rate from sysfs)
+# ---------------------------------------------------------------------------
+def read_power_supply():
+    """Read battery power_now (uW) and capacity (%).
+
+    Returns dict with keys: power_w (float watts), capacity (int %),
+    or None if no battery exists.
+    """
+    import glob
+    for bat in glob.glob("/sys/class/power_supply/BAT*"):
+        info = {}
+        # power_now in microwatts (some systems only expose energy_now/current_now)
+        try:
+            with open(os.path.join(bat, "power_now")) as f:
+                info["power_uw"] = int(f.read().strip())
+        except (OSError, ValueError):
+            # Fallback: voltage_now * current_now
+            try:
+                with open(os.path.join(bat, "voltage_now")) as f:
+                    volt = int(f.read().strip())
+                with open(os.path.join(bat, "current_now")) as f:
+                    curr = int(f.read().strip())
+                info["power_uw"] = abs(volt * curr)
+            except (OSError, ValueError):
+                pass
+        try:
+            with open(os.path.join(bat, "capacity")) as f:
+                info["capacity"] = int(f.read().strip())
+        except (OSError, ValueError):
+            pass
+        if info:
+            info["power_w"] = info.get("power_uw", 0) / 1_000_000.0
+            info["bat"] = os.path.basename(bat)
+            return info
+    return None
+
+
+def read_ac_online():
+    """Return True if AC adapter is connected."""
+    import glob
+    for src in glob.glob("/sys/class/power_supply/AC*"):
+        try:
+            with open(os.path.join(src, "online")) as f:
+                return f.read().strip() == "1"
+        except OSError:
+            continue
+    # Fallback: check if any battery is charging
+    for bat in glob.glob("/sys/class/power_supply/BAT*"):
+        try:
+            with open(os.path.join(bat, "status")) as f:
+                return f.read().strip() == "Discharging"
+        except OSError:
+            continue
+    return None
+
+
+def log_power_sample(gpu_state):
+    """Record a power sample for later trend analysis."""
+    power = read_power_supply()
+    if power is None:
+        return None
+
+    sample = {
+        "time": datetime.now().isoformat(),
+        "hour": datetime.now().hour,
+        "gpu": gpu_state,
+        "power_w": round(power["power_w"], 2),
+        "capacity": power.get("capacity"),
+        "ac": read_ac_online(),
+    }
+
+    # Append to rolling power history (last 500 samples)
+    try:
+        data = []
+        if os.path.exists(POWER_HISTORY):
+            with open(POWER_HISTORY) as f:
+                data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        data = []
+    data.append(sample)
+    data = data[-500:]
+    try:
+        os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+        tmp = POWER_HISTORY + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=None)
+        os.replace(tmp, POWER_HISTORY)
+    except OSError:
+        pass
+
+    log("Power: {:.1f}W capacity={} AC={} gpu={}".format(
+        sample["power_w"], sample["capacity"],
+        "yes" if sample["ac"] else "no", gpu_state))
+    return sample
+
+
+def compute_drain_rate(window_min=60):
+    """Estimate battery drain rate (W) over the recent window."""
+    try:
+        with open(POWER_HISTORY) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if len(data) < 2:
+        return None
+
+    cutoff = datetime.now() - timedelta(minutes=window_min)
+    recent = []
+    for s in data:
+        try:
+            t = datetime.fromisoformat(s["time"])
+        except (ValueError, KeyError):
+            continue
+        if t >= cutoff:
+            recent.append(s)
+    if len(recent) < 2:
+        return None
+
+    # If capacity dropped, compute mAh drain using capacity delta & time delta
+    first, last = recent[0], recent[-1]
+    try:
+        cap0, cap1 = first["capacity"], last["capacity"]
+        t0 = datetime.fromisoformat(first["time"])
+        t1 = datetime.fromisoformat(last["time"])
+    except (KeyError, ValueError):
+        return None
+    if cap0 is None or cap1 is None or t1 <= t0:
+        # Fall back to instantaneous power average
+        powers = [s["power_w"] for s in recent if s.get("power_w") is not None]
+        if not powers:
+            return None
+        return sum(powers) / len(powers)
+
+    hours = (t1 - t0).total_seconds() / 3600.0
+    pct_drop = cap0 - cap1
+    if pct_drop <= 0:
+        return 0.0  # charging or full
+    # Approximate: battery capacity unknown, use current instantaneous power
+    powers = [s["power_w"] for s in recent if s.get("power_w") is not None]
+    if powers:
+        return sum(powers) / len(powers)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Time-of-day workload prediction
+# ---------------------------------------------------------------------------
+def predict_from_time_of_day(history, window_days=14):
+    """Use historical observations at the same hour to predict preferred GPU.
+
+    Returns 'nvidia', 'intel', or None if insufficient data.
+    """
+    cutoff = datetime.now() - timedelta(days=window_days)
+    current_hour = datetime.now().hour
+    hour_nvidia = 0
+    hour_intel = 0
+    total = 0
+
+    for _proc, data in history.items():
+        for obs in data.get("observations", []):
+            gpu = str(obs.get("gpu", "")).lower()
+            try:
+                t = datetime.fromisoformat(obs["time"])
+            except (ValueError, KeyError):
+                continue
+            if t < cutoff:
+                continue
+            # Same hour or ±1 hour tolerance
+            if abs(t.hour - current_hour) <= 1 or \
+               (current_hour == 23 and t.hour == 0) or \
+               (current_hour == 0 and t.hour == 23):
+                total += 1
+                if gpu == "nvidia":
+                    hour_nvidia += 1
+                else:
+                    hour_intel += 1
+
+    if total < 5:
+        return None
+    if hour_nvidia > hour_intel * 1.3:
+        return "nvidia"
+    if hour_intel > hour_nvidia * 1.3:
+        return "intel"
+    return None
 
 
 def detect_process_gpu(pid, nvidia_pids):
@@ -450,10 +638,33 @@ def decide_and_switch():
     """Analyze workload, decide target GPU, and switch if needed."""
     history = load_history()
     decision = analyze_workload(history)
-    log("Workload analysis: {}".format(decision))
+    log("Workload analysis (recent window): {}".format(decision))
+
+    # Time-of-day prediction as secondary signal
+    tod_pred = predict_from_time_of_day(history)
+    if tod_pred:
+        log("Time-of-day prediction (hour {}): {}".format(
+            datetime.now().hour, tod_pred))
+
+    # Combine: recent window is primary; TOD only decides ties
+    if decision == "balanced" and tod_pred:
+        decision = tod_pred
+        log("Using time-of-day prediction to break tie: {}".format(decision))
+
+    # Power-aware bias: on battery with high drain, prefer intel unless
+    # recent workload strongly demands nvidia
+    power = read_power_supply()
+    if power and not read_ac_online():
+        drain = compute_drain_rate()
+        if drain and drain > 25.0 and decision == "balanced":
+            decision = "intel"
+            log("Battery drain {:.1f}W > 25W, biasing to intel".format(drain))
 
     current = get_current_gpu()
     log("Current GPU state: {}".format(current))
+
+    # Record power sample for trend analysis
+    log_power_sample(current)
 
     if decision == "nvidia":
         if current not in ("ON", "AUTO"):
@@ -475,6 +686,23 @@ def decide_and_switch():
 
 
 def main():
+    # Allow `gpu_auto_switcher.py power` for power report
+    if len(sys.argv) > 1 and sys.argv[1] in ("power", "--power"):
+        power = read_power_supply()
+        ac = read_ac_online()
+        drain = compute_drain_rate()
+        if power is None:
+            print("No battery found.")
+            return
+        print("Battery: {}  Capacity: {}%  Power: {:.1f}W  AC: {}".format(
+            power.get("bat", "?"), power.get("capacity", "?"),
+            power["power_w"], "connected" if ac else "disconnected"))
+        if drain is not None:
+            print("Average drain (60min): {:.1f}W".format(drain))
+        else:
+            print("Drain rate: insufficient data")
+        return
+
     log("=== GPU Auto-Switcher starting ===")
     log("History: {}".format(GPU_HISTORY))
     log("Titan daemon: {}".format(
@@ -483,6 +711,13 @@ def main():
     # Enrich history with nvidia-smi GPU stats
     util, mem = get_nvidia_gpu_stats()
     log("nvidia-smi: utilization={}%, memory={}MB".format(util, mem))
+
+    # Power status summary
+    power = read_power_supply()
+    if power:
+        log("Power: {:.1f}W capacity={} AC={}".format(
+            power["power_w"], power.get("capacity"),
+            "yes" if read_ac_online() else "no"))
 
     log("Tracking process GPU usage...")
     track_processes()
