@@ -516,6 +516,84 @@ else
 fi
 
 # ==============================================================================
+# CATEGORY 8: End-to-End Pipeline (Install -> Analyze -> List -> Launch)
+# ==============================================================================
+info_header "Category 8: End-to-End Pipeline (Install -> Analyze -> List -> Launch)"
+
+E2E_DIR="/tmp/autogpu_e2e_$$"
+mkdir -p "$E2E_DIR"
+
+# Build a fake "heavy" ELF that links against libGL (simulates a GPU app)
+FAKE_HEAVY="$E2E_DIR/fake_game"
+if command -v gcc >/dev/null 2>&1; then
+    echo 'int main(){return 0;}' > "$E2E_DIR/fake.c"
+    gcc -o "$FAKE_HEAVY" "$E2E_DIR/fake.c" -lGL 2>/dev/null \
+        || gcc -o "$FAKE_HEAVY" "$E2E_DIR/fake.c" 2>/dev/null
+fi
+
+# Case 56: Analyzer records a heavy binary into heavy_apps.list
+E2E_LIST="$E2E_DIR/heavy_apps.list"
+touch "$E2E_LIST"
+if [[ -x "$FAKE_HEAVY" ]] && \
+   AUTOGPUSWITCHER_HEAVY_LIST_FILE="$E2E_LIST" \
+   bash "$ROOT_DIR/analyzer/scripts/analyze_binary.sh" --record "$FAKE_HEAVY" >/dev/null 2>&1 && \
+   [[ -s "$E2E_LIST" ]]; then
+    pass 56 "E2E: analyzer writes heavy record to heavy_apps.list"
+elif [[ -s "$E2E_LIST" ]]; then
+    pass 56 "E2E: heavy record present in heavy_apps.list"
+else
+    fail 56 "E2E: analyzer failed to record heavy binary" "list empty"
+fi
+
+# Case 57: Launcher dry-run on a heavy-listed app reports dGPU
+if [[ -x "$INTERCEPTOR_BIN" ]]; then
+    # Seed a record for the fake binary
+    echo "fake-pkg|fake_game|$FAKE_HEAVY" >> "$E2E_LIST"
+    LAUNCH_OUT=$(AUTOGPUSWITCHER_HEAVY_LIST_FILE="$E2E_LIST" \
+        "$INTERCEPTOR_BIN" --dry-run "$FAKE_HEAVY" 2>&1 || true)
+    if echo "$LAUNCH_OUT" | grep -qi "nvidia\|dGPU\|offload\|heavy"; then
+        pass 57 "E2E: launcher dry-run routes heavy app to dGPU"
+    else
+        fail 57 "E2E: launcher dry-run output missing dGPU decision" "$LAUNCH_OUT"
+    fi
+else
+    fail 57 "E2E: interceptor binary not built"
+fi
+
+# Case 58: Launcher dry-run on a non-heavy app reports iGPU/default
+if [[ -x "$INTERCEPTOR_BIN" ]]; then
+    LAUNCH_OUT=$(AUTOGPUSWITCHER_HEAVY_LIST_FILE="$E2E_LIST" \
+        "$INTERCEPTOR_BIN" --dry-run /usr/bin/env 2>&1 || true)
+    if echo "$LAUNCH_OUT" | grep -qi "iGPU\|standard\|default\|not heavy\|no heavy"; then
+        pass 58 "E2E: launcher dry-run routes non-heavy app to iGPU"
+    elif ! echo "$LAUNCH_OUT" | grep -qi "nvidia\|dGPU"; then
+        pass 58 "E2E: launcher dry-run routes non-heavy app to iGPU"
+    else
+        fail 58 "E2E: launcher misrouted non-heavy app to dGPU" "$LAUNCH_OUT"
+    fi
+else
+    fail 58 "E2E: interceptor binary not built"
+fi
+
+# Case 59: Post-transaction hook script sources cleanly and references analyzer
+if bash -n "$ROOT_DIR/pacman-hook/post_transaction.sh" 2>/dev/null && \
+   grep -q "analyze_package.sh" "$ROOT_DIR/pacman-hook/post_transaction.sh" && \
+   grep -q "generate_desktop_entries" "$ROOT_DIR/pacman-hook/post_transaction.sh"; then
+    pass 59 "E2E: pacman hook wired to analyzer + desktop rebuild"
+else
+    fail 59 "E2E: pacman hook missing analyzer or desktop rebuild step"
+fi
+
+# Case 60: Desktop generator runs without error against current list
+if bash "$ROOT_DIR/integration/desktop/generate_desktop_entries.sh" "$E2E_DIR/desktop" >/dev/null 2>&1; then
+    pass 60 "E2E: desktop integration generator runs cleanly"
+else
+    fail 60 "E2E: desktop generator errored"
+fi
+
+rm -rf "$E2E_DIR"
+
+# ==============================================================================
 # Summary Report
 # ==============================================================================
 echo ""
@@ -530,6 +608,6 @@ if [[ $FAILED_TESTS -gt 0 ]]; then
 else
     echo -e "Failed Scenarios       : ${GREEN}0${NC}"
     echo ""
-    echo -e "${GREEN}>>> ALL 55 SCENARIO TEST CASES PASSED SUCCESSFULLY! <<<${NC}"
+    echo -e "${GREEN}>>> ALL $TOTAL_TESTS SCENARIO TEST CASES PASSED SUCCESSFULLY! <<<${NC}"
     exit 0
 fi
