@@ -4,6 +4,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -12,17 +13,19 @@
 #include "config.hpp"
 #include "gpu_detector.hpp"
 #include "power_manager.hpp"
+#include "socket_path.hpp"
 #include "workload_classifier.hpp"
 
 namespace titan {
 
-static std::string get_socket_path() {
-    const char* env = std::getenv("TITAN_SOCKET_PATH");
-    return env ? std::string(env) : "/tmp/titan-gpu-daemon.sock";
-}
-
 static bool send_command(const std::string& cmd) {
     auto socket_path = get_socket_path();
+
+    if (socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
+        std::cerr << "socket path too long: " << socket_path << "\n";
+        return false;
+    }
+
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         std::cerr << "cannot create socket\n";
@@ -31,7 +34,7 @@ static bool send_command(const std::string& cmd) {
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+    std::memcpy(addr.sun_path, socket_path.c_str(), socket_path.size() + 1);
 
     if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "daemon not running (socket: " << socket_path << ")\n";
@@ -39,7 +42,12 @@ static bool send_command(const std::string& cmd) {
         return false;
     }
 
-    send(fd, cmd.c_str(), cmd.size(), 0);
+    ssize_t sent = send(fd, cmd.c_str(), cmd.size(), MSG_NOSIGNAL);
+    if (sent != static_cast<ssize_t>(cmd.size())) {
+        std::cerr << "failed to send command to daemon\n";
+        close(fd);
+        return false;
+    }
 
     char buf[4096]{};
     ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
@@ -48,6 +56,9 @@ static bool send_command(const std::string& cmd) {
     if (n > 0) {
         std::cout.write(buf, n);
         return true;
+    }
+    if (n == 0) {
+        std::cerr << "daemon closed the connection without replying\n";
     }
     return false;
 }

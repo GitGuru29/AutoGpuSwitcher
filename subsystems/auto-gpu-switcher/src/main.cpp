@@ -11,12 +11,12 @@
 #include <iostream>
 #include <string>
 
-#include "cli.hpp"
 #include "config.hpp"
 #include "gpu_detector.hpp"
 #include "gpu_enforcer.hpp"
 #include "hyprland_ipc_bridge.hpp"
 #include "power_manager.hpp"
+#include "socket_path.hpp"
 #include "state_writer.hpp"
 #include "workload_classifier.hpp"
 
@@ -28,9 +28,17 @@ static void handle_signal(int sig) {
     if (sig == SIGHUP) g_reload = true;
 }
 
-static std::string get_socket_path() {
-    const char* env = std::getenv("TITAN_SOCKET_PATH");
-    return env ? std::string(env) : "/tmp/titan-gpu-daemon.sock";
+static bool probe_existing_socket(const std::string& socket_path) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::memcpy(addr.sun_path, socket_path.c_str(), socket_path.size() + 1);
+
+    bool in_use = (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);
+    close(fd);
+    return in_use;
 }
 
 class Daemon {
@@ -62,6 +70,11 @@ public:
 
         ipc_.set_callback([this](const titan::WindowEvent& ev) {
             on_window_change(ev);
+        });
+
+        ipc_.set_reconnect_callback([this]() {
+            std::cout << "[ipc] hyprland reconnected, dropping stale window tracking\n";
+            enforcer_->clear_dgpu_windows();
         });
 
         state_writer_.write(detector_, power_, current_target_, active_app_);
@@ -107,19 +120,15 @@ private:
         if (ev.type == titan::WindowEventType::Closed) {
             std::cout << "[ipc] window closed: addr=" << ev.addr << "\n";
             enforcer_->remove_dgpu_window(ev.addr);
+            active_app_.clear();
             return;
         }
 
         std::cout << "[ipc] active window: " << ev.wm_class << " (" << ev.title << ") addr=" << ev.addr << "\n";
         active_app_ = ev.wm_class;
 
-        titan::EnforcementResult result;
-        if (manual_override_active_) {
-            result = enforcer_->enforce_target_window(manual_override_, ev.addr);
-        } else {
-            result = enforcer_->enforce_for_app_window(ev.wm_class, ev.addr);
-        }
-        current_target_ = result.target;
+        auto result = enforcer_->enforce_for_app_window(ev.wm_class, ev.addr);
+        current_target_ = manual_override_active_ ? manual_override_ : result.target;
 
         if (result.power_transitioned) {
             std::cout << "[ipc] power transitioned for " << ev.wm_class << "\n";
@@ -127,7 +136,18 @@ private:
     }
 
     bool setup_socket() {
-        auto socket_path = get_socket_path();
+        auto socket_path = titan::get_socket_path();
+
+        if (socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
+            std::cerr << "[daemon] socket path too long: " << socket_path << "\n";
+            return false;
+        }
+
+        if (probe_existing_socket(socket_path)) {
+            std::cerr << "[daemon] another instance is already listening on " << socket_path << "\n";
+            return false;
+        }
+
         ::unlink(socket_path.c_str());
 
         listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -138,7 +158,7 @@ private:
 
         struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
-        std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+        std::memcpy(addr.sun_path, socket_path.c_str(), socket_path.size() + 1);
 
         if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
             std::cerr << "[daemon] bind() failed: " << std::strerror(errno) << "\n";
@@ -180,7 +200,7 @@ private:
         if (n > 0) {
             std::string cmd(buf, static_cast<size_t>(n));
             auto response = process_command(cmd);
-            send(client_fd, response.c_str(), response.size(), 0);
+            send(client_fd, response.c_str(), response.size(), MSG_NOSIGNAL);
         }
         close(client_fd);
     }
@@ -271,7 +291,7 @@ private:
             close(listen_fd_);
             listen_fd_ = -1;
         }
-        auto socket_path = get_socket_path();
+        auto socket_path = titan::get_socket_path();
         ::unlink(socket_path.c_str());
 
         auto dgpu = detector_.find_dgpu();

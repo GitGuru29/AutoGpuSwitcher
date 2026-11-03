@@ -1,6 +1,9 @@
 #include <unistd.h>
 
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <vector>
 
@@ -9,7 +12,12 @@
 
 void print_usage(const char* prog) {
     std::cout << "Usage:\n"
-              << "  " << prog << " [--force-dgpu] [--dry-run] <binary_path_or_cmd> [args...]\n";
+              << "  " << prog << " [--force-dgpu] [--dry-run] [--] <binary_path_or_cmd> [args...]\n"
+              << "\n"
+              << "Options:\n"
+              << "  --force-dgpu  Apply the dGPU environment regardless of the heavy app list\n"
+              << "  --dry-run     Report the decision without executing anything\n"
+              << "  --help        Show this help\n";
 }
 
 int main(int argc, char** argv) {
@@ -22,18 +30,25 @@ int main(int argc, char** argv) {
     bool dry_run = false;
     int target_idx = 1;
 
-    while (target_idx < argc && argv[target_idx][0] == '-') {
-        if (std::strcmp(argv[target_idx], "--force-dgpu") == 0) {
+    for (; target_idx < argc; ++target_idx) {
+        const char* arg = argv[target_idx];
+
+        if (arg[0] != '-' || arg[1] == '\0') break;  // target, not an option
+        if (std::strcmp(arg, "--") == 0) {
+            ++target_idx;
+            break;
+        }
+        if (std::strcmp(arg, "--force-dgpu") == 0) {
             force_dgpu = true;
-            target_idx++;
-        } else if (std::strcmp(argv[target_idx], "--dry-run") == 0) {
+        } else if (std::strcmp(arg, "--dry-run") == 0) {
             dry_run = true;
-            target_idx++;
-        } else if (std::strcmp(argv[target_idx], "--help") == 0) {
+        } else if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
             print_usage(argv[0]);
             return 0;
         } else {
-            break;
+            std::cerr << "[launcher] Error: unknown option " << arg << "\n";
+            print_usage(argv[0]);
+            return 2;
         }
     }
 
@@ -44,7 +59,13 @@ int main(int argc, char** argv) {
     }
 
     const char* target_cmd = argv[target_idx];
-    bool heavy = force_dgpu || is_heavy_app(target_cmd);
+
+    if (!force_dgpu && !std::filesystem::exists(get_heavy_list_path())) {
+        std::cerr << "[launcher] warning: heavy app list not found at "
+                  << get_heavy_list_path() << " (treating apps as non-heavy)\n";
+    }
+
+    const bool heavy = force_dgpu || is_heavy_app(target_cmd);
 
     if (heavy) {
         apply_dgpu_environment();
