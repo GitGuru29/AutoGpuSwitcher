@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# AutoGpuSwitcher - 55 Scenario Worst-Case & Edge-Case Test Suite Runner
+# AutoGpuSwitcher - Worst-Case & Edge-Case Scenario Test Suite Runner
 # ==============================================================================
 set -u
 
@@ -14,6 +14,7 @@ DAEMON_BIN="$BUILD_DIR/titan-gpu-switcherd"
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
+SKIPPED_TESTS=0
 
 # Colors
 GREEN='\033[0;32m'
@@ -37,6 +38,35 @@ fail() {
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
     FAILED_TESTS=$((FAILED_TESTS + 1))
     printf "  [${RED}FAIL${NC}] Case %02d: %s (%s)\n" "$num" "$name" "$reason"
+}
+
+skip() {
+    local num="$1"
+    local name="$2"
+    local reason="${3:-}"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    SKIPPED_TESTS=$((SKIPPED_TESTS + 1))
+    printf "  [${YELLOW}SKIP${NC}] Case %02d: %s (%s)\n" "$num" "$name" "$reason"
+}
+
+# Run an external test script: 0 = pass, 2 = skip, anything else = fail.
+run_external_test() {
+    local num="$1"
+    local name="$2"
+    shift 2
+
+    local output rc
+    output=$("$@" 2>&1)
+    rc=$?
+
+    case "$rc" in
+        0) pass "$num" "$name" ;;
+        2) skip "$num" "$name" "environment unavailable" ;;
+        *)
+            fail "$num" "$name" "exit $rc"
+            printf '%s\n' "$output" | sed 's/^/        /'
+            ;;
+    esac
 }
 
 info_header() {
@@ -594,6 +624,56 @@ fi
 rm -rf "$E2E_DIR"
 
 # ==============================================================================
+# CATEGORY 9: Real Hardware & System Hook (Live Layer)
+# ==============================================================================
+info_header "Category 9: Real Hardware & System Hook (Live Layer)"
+
+# Case 61: Launcher env injection + actual dGPU render node use
+run_external_test 61 "Real launcher: PRIME env + dGPU render node" \
+    bash "$ROOT_DIR/tests/real_render_test.sh"
+
+# Case 62: pacman hook records a real package into an isolated heavy list
+run_external_test 62 "Real pacman hook: analyze package and record heavy app" \
+    bash "$ROOT_DIR/tests/pacman_hook_test.sh"
+
+# Case 63: Analyzer detects a graphics engine that dlopens its backend
+SUPERPOSITION_BIN="/opt/unigine-superposition/bin/superposition"
+if [[ -x "$SUPERPOSITION_BIN" ]]; then
+    ANALYZE_TMP=$(mktemp -d /tmp/titan-analyze-XXXXXX)
+    ANALYZE_OUT=$(AUTOGPUSWITCHER_CONFIG_FILE="$ANALYZE_TMP/no.conf" \
+        AUTOGPUSWITCHER_STATE_DIR="$ANALYZE_TMP/state" \
+        AUTOGPUSWITCHER_HEAVY_LIST_FILE="$ANALYZE_TMP/state/heavy.list" \
+        bash "$ROOT_DIR/analyzer/scripts/analyze_binary.sh" \
+        "$SUPERPOSITION_BIN" 2>&1 || true)
+    rm -rf "$ANALYZE_TMP"
+    if grep -q 'superposition' <<< "$ANALYZE_OUT"; then
+        pass 63 "Analyzer detects dlopen-only Unigine engine as heavy"
+    else
+        fail 63 "Analyzer missed dlopen-only Unigine engine" "$ANALYZE_OUT"
+    fi
+else
+    skip 63 "Analyzer detects dlopen-only Unigine engine" "Unigine not installed"
+fi
+
+# Case 64: Launcher finds the repo heavy list even when CWD is elsewhere
+REPO_HEAVY_LIST="$ROOT_DIR/state/heavy_apps.list"
+if [[ -f "$REPO_HEAVY_LIST" && ! -f /var/lib/autogpuswitcher/heavy_apps.list && -x "$INTERCEPTOR_BIN" ]]; then
+    TEST_HEAVY_PATH=$(awk -F'|' 'NF >= 3 && $3 ~ /^\// {print $3; exit}' "$REPO_HEAVY_LIST")
+    if [[ -n "$TEST_HEAVY_PATH" && -x "$TEST_HEAVY_PATH" ]]; then
+        CWD_OUT=$(cd /tmp && "$INTERCEPTOR_BIN" --dry-run "$TEST_HEAVY_PATH" 2>&1 || true)
+        if grep -qi 'heavy app detected' <<< "$CWD_OUT"; then
+            pass 64 "Launcher resolves repo heavy list from a different CWD"
+        else
+            fail 64 "Launcher lost repo heavy list outside repo root" "$CWD_OUT"
+        fi
+    else
+        skip 64 "Launcher resolves repo heavy list from a different CWD" "no runnable heavy record"
+    fi
+else
+    skip 64 "Launcher resolves repo heavy list from a different CWD" "repo list or interceptor unavailable"
+fi
+
+# ==============================================================================
 # Summary Report
 # ==============================================================================
 echo ""
@@ -602,12 +682,17 @@ echo -e "${YELLOW}                 TEST SUITE EXECUTION SUMMARY                 
 echo -e "${BLUE}======================================================================${NC}"
 echo "Total Scenarios Tested : $TOTAL_TESTS"
 echo -e "Passed Scenarios       : ${GREEN}$PASSED_TESTS${NC}"
+echo -e "Skipped Scenarios      : ${YELLOW}$SKIPPED_TESTS${NC}"
 if [[ $FAILED_TESTS -gt 0 ]]; then
     echo -e "Failed Scenarios       : ${RED}$FAILED_TESTS${NC}"
     exit 1
 else
     echo -e "Failed Scenarios       : ${GREEN}0${NC}"
     echo ""
-    echo -e "${GREEN}>>> ALL $TOTAL_TESTS SCENARIO TEST CASES PASSED SUCCESSFULLY! <<<${NC}"
+    if [[ $SKIPPED_TESTS -gt 0 ]]; then
+        echo -e "${GREEN}>>> ALL EXECUTED SCENARIOS PASSED ($SKIPPED_TESTS skipped) <<<${NC}"
+    else
+        echo -e "${GREEN}>>> ALL $TOTAL_TESTS SCENARIO TEST CASES PASSED SUCCESSFULLY! <<<${NC}"
+    fi
     exit 0
 fi

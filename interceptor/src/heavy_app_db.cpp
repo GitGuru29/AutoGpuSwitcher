@@ -7,6 +7,23 @@
 #include <sstream>
 #include <vector>
 
+static std::string repo_state_list_path() {
+    // Resolve <repo>/interceptor/build/autogpuswitcher-launcher back to
+    // <repo>/state/heavy_apps.list. Using the executable path instead of the
+    // current working directory means game launchers and desktop entries work
+    // even when they change into their own install directory first.
+    std::error_code ec;
+    const auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec || exe.empty()) return {};
+
+    const auto repo_root = exe.parent_path().parent_path().parent_path();
+    const auto candidate = repo_root / "state" / "heavy_apps.list";
+    if (std::filesystem::exists(candidate, ec)) {
+        return candidate.string();
+    }
+    return {};
+}
+
 std::string get_heavy_list_path() {
     const char* env = std::getenv("AUTOGPUSWITCHER_HEAVY_LIST_FILE");
     if (env && *env) return env;
@@ -14,6 +31,10 @@ std::string get_heavy_list_path() {
     if (std::filesystem::exists("/var/lib/autogpuswitcher/heavy_apps.list")) {
         return "/var/lib/autogpuswitcher/heavy_apps.list";
     }
+
+    const std::string repo_list = repo_state_list_path();
+    if (!repo_list.empty()) return repo_list;
+
     if (std::filesystem::exists("state/heavy_apps.list")) {
         return "state/heavy_apps.list";
     }

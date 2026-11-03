@@ -1,4 +1,6 @@
 state/heavy_apps.list
+state/heavy_apps.list.lock
+state/heavy_apps.list.new
 state/first_run_complete
 state/cache/
 state/logs/

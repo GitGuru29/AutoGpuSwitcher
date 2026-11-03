@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -424,7 +425,35 @@ TEST_F(GpuDetectorTest, RenderNodeForUnknownVendor) {
 // ═════════════════════════════════════════════
 class PowerManagerTest : public ::testing::Test {
 protected:
+    void TearDown() override {
+        unsetenv("TITAN_POWER_SUPPLY_PATH");
+        unsetenv("AC_PATH");
+        if (!temp_dir_.empty()) {
+            std::error_code ec;
+            fs::remove_all(temp_dir_, ec);
+        }
+    }
+
+    fs::path make_supply(const std::string& name, const std::string& type,
+                         const std::string& online) {
+        if (temp_dir_.empty()) {
+            temp_dir_ = fs::temp_directory_path() /
+                ("titan_power_test_" + std::to_string(getpid()));
+            fs::create_directories(temp_dir_);
+        }
+        auto dir = temp_dir_ / name;
+        fs::create_directories(dir);
+        std::ofstream(dir / "type") << type << "\n";
+        std::ofstream(dir / "online") << online << "\n";
+        return dir;
+    }
+
+    void use_supply_base() {
+        setenv("TITAN_POWER_SUPPLY_PATH", temp_dir_.c_str(), 1);
+    }
+
     titan::PowerManager pm_;
+    fs::path temp_dir_;
 };
 
 TEST_F(PowerManagerTest, InitSucceeds) {
@@ -462,6 +491,60 @@ TEST_F(PowerManagerTest, GetPciPowerOnRealDevice) {
 TEST_F(PowerManagerTest, SetPciPowerInvalidPath) {
     pm_.init();
     EXPECT_FALSE(pm_.set_pci_power("99:99.9", titan::PowerState::On));
+}
+
+TEST_F(PowerManagerTest, DetectsMainsSupplyByTypeNotName) {
+    // Regression: ADP0-based laptops were reported as Unknown and treated
+    // as AC forever, so the battery heuristic never ran.
+    make_supply("ADP0", "Mains", "1");
+    make_supply("BAT0", "Battery", "");
+    use_supply_base();
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::AC);
+    EXPECT_FALSE(pm_.is_on_battery());
+}
+
+TEST_F(PowerManagerTest, MainsOfflineReportsBattery) {
+    make_supply("ADP0", "Mains", "0");
+    make_supply("BAT0", "Battery", "");
+    use_supply_base();
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::Battery);
+    EXPECT_TRUE(pm_.is_on_battery());
+}
+
+TEST_F(PowerManagerTest, MissingSupplyReportsUnknown) {
+    temp_dir_ = fs::temp_directory_path() /
+        ("titan_power_empty_" + std::to_string(getpid()));
+    fs::create_directories(temp_dir_);
+    use_supply_base();
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::Unknown);
+    EXPECT_FALSE(pm_.is_on_battery());
+}
+
+TEST_F(PowerManagerTest, FallsBackToLegacyAcName) {
+    temp_dir_ = fs::temp_directory_path() /
+        ("titan_power_legacy_" + std::to_string(getpid()));
+    auto dir = temp_dir_ / "AC";
+    fs::create_directories(dir);
+    std::ofstream(dir / "online") << "1\n";
+    use_supply_base();
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::AC);
+}
+
+TEST_F(PowerManagerTest, AcPathOverrideWins) {
+    auto dir = make_supply("ADP0", "Mains", "0");
+    const std::string online = (dir / "online").string();
+    setenv("AC_PATH", online.c_str(), 1);
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::Battery);
 }
 
 // ═════════════════════════════════════════════

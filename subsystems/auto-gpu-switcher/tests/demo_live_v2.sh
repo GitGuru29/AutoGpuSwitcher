@@ -11,7 +11,7 @@ BUILD_DIR="$SUBSYSTEM_DIR/build"
 CLEANUP_PIDS=""
 cleanup() {
     echo ""
-    for pid in $CLEANUP_PIDS; do kill -9 "$pid" 2>/dev/null; done
+    for pid in $CLEANUP_PIDS; do kill -9 "$pid" 2>/dev/null || true; done
     rm -f /tmp/titan-live/daemon.sock
     rm -rf /tmp/titan-live/runtime
 }

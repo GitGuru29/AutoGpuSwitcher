@@ -98,6 +98,11 @@ int main(int argc, char** argv) {
     }
     exec_args.push_back(nullptr);
 
+    // stdio buffers are not inherited across execvp(); without this the
+    // decision message is lost on every real launch (only --dry-run shows it).
+    std::cout.flush();
+    std::cerr.flush();
+
     execvp(exec_args[0], exec_args.data());
 
     std::cerr << "[launcher] Error: failed to execute " << target_cmd << ": "
