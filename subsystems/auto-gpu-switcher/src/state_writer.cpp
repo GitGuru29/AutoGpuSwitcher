@@ -39,7 +39,12 @@ static std::string json_escape(const std::string& s) {
 
 std::filesystem::path StateWriter::state_path() {
     const char* env = std::getenv("TITAN_STATE_PATH");
-    return env ? std::filesystem::path(env) : std::filesystem::path("/tmp/titan_gpu_state");
+    if (env) return std::filesystem::path(env);
+    // Prefer systemd RuntimeDirectory over world-writable /tmp
+    if (std::filesystem::exists("/run/titan-gpu")) {
+        return "/run/titan-gpu/state.json";
+    }
+    return "/tmp/titan_gpu_state";
 }
 
 const char* StateWriter::power_source_str(PowerSource ps) {
@@ -97,6 +102,24 @@ void StateWriter::write(const GpuDetector& detector,
     if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
         std::cerr << "[state_writer] cannot replace " << path << "\n";
         std::remove(tmp_path.c_str());
+    // Change detection: skip write if content is identical to last write
+    // (avoids ~1-10 Hz disk churn when nothing has changed)
+    std::string content = json.str();
+    if (content == last_content_) return;
+    last_content_ = content;
+
+    // Atomic write: temp file + rename (avoids partial reads by waybar etc.)
+    auto tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (f.is_open()) {
+            f << content;
+            f.close();
+            std::filesystem::rename(tmp, path);
+        } else {
+            std::cerr << "[state_writer] cannot write " << tmp << "\n";
+        }
     }
 }
 

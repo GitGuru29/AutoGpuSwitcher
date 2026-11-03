@@ -4,11 +4,41 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <fstream>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include "env_policy.hpp"
 #include "heavy_app_db.hpp"
+
+static const char* kDefaultLogPath = "/tmp/autogpuswitcher-launcher.log";
+
+static std::string get_log_path() {
+    const char* env = std::getenv("AUTOGPUSWITCHER_LOG_FILE");
+    return env ? std::string(env) : std::string(kDefaultLogPath);
+}
+
+static void log_decision(const char* target, bool heavy, bool dry_run) {
+    std::ofstream f(get_log_path(), std::ios::app);
+    if (!f.is_open()) return;
+
+    char timestamp[32];
+    std::time_t now = std::time(nullptr);
+    std::tm tm_buf{};
+    localtime_r(&now, &tm_buf);
+    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm_buf);
+
+    f << timestamp
+      << " | app=" << target
+      << " | decision=" << (heavy ? "dGPU" : "iGPU")
+      << " | reason=" << (heavy ? "heavy" : "standard")
+      << (dry_run ? " | dry_run=yes" : "")
+      << "\n";
+}
 
 void print_usage(const char* prog) {
     std::cout << "Usage:\n"
@@ -67,6 +97,8 @@ int main(int argc, char** argv) {
 
     const bool heavy = force_dgpu || is_heavy_app(target_cmd);
 
+    log_decision(target_cmd, heavy, dry_run);
+
     if (heavy) {
         apply_dgpu_environment();
         std::cout << "[launcher] heavy app detected (" << target_cmd
@@ -86,6 +118,11 @@ int main(int argc, char** argv) {
         exec_args.push_back(argv[i]);
     }
     exec_args.push_back(nullptr);
+
+    // stdio buffers are not inherited across execvp(); without this the
+    // decision message is lost on every real launch (only --dry-run shows it).
+    std::cout.flush();
+    std::cerr.flush();
 
     execvp(exec_args[0], exec_args.data());
 

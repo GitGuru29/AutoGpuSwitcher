@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -451,7 +452,35 @@ TEST_F(GpuDetectorTest, RenderNodeForUnknownVendor) {
 // ═════════════════════════════════════════════
 class PowerManagerTest : public ::testing::Test {
 protected:
+    void TearDown() override {
+        unsetenv("TITAN_POWER_SUPPLY_PATH");
+        unsetenv("AC_PATH");
+        if (!temp_dir_.empty()) {
+            std::error_code ec;
+            fs::remove_all(temp_dir_, ec);
+        }
+    }
+
+    fs::path make_supply(const std::string& name, const std::string& type,
+                         const std::string& online) {
+        if (temp_dir_.empty()) {
+            temp_dir_ = fs::temp_directory_path() /
+                ("titan_power_test_" + std::to_string(getpid()));
+            fs::create_directories(temp_dir_);
+        }
+        auto dir = temp_dir_ / name;
+        fs::create_directories(dir);
+        std::ofstream(dir / "type") << type << "\n";
+        std::ofstream(dir / "online") << online << "\n";
+        return dir;
+    }
+
+    void use_supply_base() {
+        setenv("TITAN_POWER_SUPPLY_PATH", temp_dir_.c_str(), 1);
+    }
+
     titan::PowerManager pm_;
+    fs::path temp_dir_;
 };
 
 TEST_F(PowerManagerTest, InitSucceeds) {
@@ -489,6 +518,60 @@ TEST_F(PowerManagerTest, GetPciPowerOnRealDevice) {
 TEST_F(PowerManagerTest, SetPciPowerInvalidPath) {
     pm_.init();
     EXPECT_FALSE(pm_.set_pci_power("99:99.9", titan::PowerState::On));
+}
+
+TEST_F(PowerManagerTest, DetectsMainsSupplyByTypeNotName) {
+    // Regression: ADP0-based laptops were reported as Unknown and treated
+    // as AC forever, so the battery heuristic never ran.
+    make_supply("ADP0", "Mains", "1");
+    make_supply("BAT0", "Battery", "");
+    use_supply_base();
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::AC);
+    EXPECT_FALSE(pm_.is_on_battery());
+}
+
+TEST_F(PowerManagerTest, MainsOfflineReportsBattery) {
+    make_supply("ADP0", "Mains", "0");
+    make_supply("BAT0", "Battery", "");
+    use_supply_base();
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::Battery);
+    EXPECT_TRUE(pm_.is_on_battery());
+}
+
+TEST_F(PowerManagerTest, MissingSupplyReportsUnknown) {
+    temp_dir_ = fs::temp_directory_path() /
+        ("titan_power_empty_" + std::to_string(getpid()));
+    fs::create_directories(temp_dir_);
+    use_supply_base();
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::Unknown);
+    EXPECT_FALSE(pm_.is_on_battery());
+}
+
+TEST_F(PowerManagerTest, FallsBackToLegacyAcName) {
+    temp_dir_ = fs::temp_directory_path() /
+        ("titan_power_legacy_" + std::to_string(getpid()));
+    auto dir = temp_dir_ / "AC";
+    fs::create_directories(dir);
+    std::ofstream(dir / "online") << "1\n";
+    use_supply_base();
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::AC);
+}
+
+TEST_F(PowerManagerTest, AcPathOverrideWins) {
+    auto dir = make_supply("ADP0", "Mains", "0");
+    const std::string online = (dir / "online").string();
+    setenv("AC_PATH", online.c_str(), 1);
+
+    ASSERT_TRUE(pm_.init());
+    EXPECT_EQ(pm_.current_source(), titan::PowerSource::Battery);
 }
 
 // ═════════════════════════════════════════════
@@ -705,6 +788,21 @@ TEST_F(EnforcerTest, ClearDgpuWindowsReleasesClients) {
     enforcer_->clear_dgpu_windows();
     EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
     EXPECT_EQ(enforcer_->active_dgpu_client_count(), 0u);
+TEST_F(EnforcerTest, IdempotentDGPUOverrideNoLeak) {
+    // Regression: repeated `set dgpu` then one `set igpu` used to leave
+    // the counter >0 forever, so idle_power_off() never fired.
+    enforcer_->enforce_target(titan::GpuTarget::DGPU, /*idempotent=*/true);
+    enforcer_->enforce_target(titan::GpuTarget::DGPU, /*idempotent=*/true);
+    enforcer_->enforce_target(titan::GpuTarget::DGPU, /*idempotent=*/true);
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 1u);
+
+    enforcer_->enforce_target(titan::GpuTarget::IGPU, /*idempotent=*/true);
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 0u);
+
+    // idle power-off must now be able to run
+    enforcer_->idle_power_off(0);
 }
 
 TEST_F(EnforcerTest, ResetDGPUClients) {
@@ -917,4 +1015,176 @@ TEST_F(IntegrationTest, ManualOverrideIgnoresRules) {
     auto result = enforcer_->enforce_target(titan::GpuTarget::IGPU);
     EXPECT_EQ(result.target, titan::GpuTarget::IGPU);
     EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+}
+
+// ─────────────────────────────────────────────
+// WorkloadAnalyzer (C++ port of analyzer/workload_analyzer.py)
+// ─────────────────────────────────────────────
+#include "workload_analyzer.hpp"
+
+static fs::path write_history(const std::string& content) {
+    auto p = fs::path("/tmp") / ("titan_test_hist_" + std::to_string(getpid()) + ".dat");
+    std::ofstream f(p);
+    f << content;
+    f.close();
+    return p;
+}
+
+static std::string iso_ago(int seconds_ago) {
+    std::time_t t = std::time(nullptr) - seconds_ago;
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+    return buf;
+}
+
+TEST(WorkloadAnalyzerTest, EmptyHistoryYieldsAuto) {
+    auto p = write_history("# titan-workload-history v1\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 0u);
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::Auto);
+    EXPECT_EQ(wa.predict_time_of_day(), titan::GpuTarget::Auto);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, ParsesLineFormat) {
+    auto now = iso_ago(0);
+    auto p = write_history(
+        "# titan-workload-history v1\n"
+        "/usr/bin/steam|5|nvidia|" + now + "|nvidia:" + now + ",nvidia:" + now + "\n"
+        "/usr/bin/vim|3|intel|" + now + "|intel:" + now + "\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 2u);
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::Auto);  // only 2 apps < 4
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, StrongNvidiaWorkloadYieldsDGPU) {
+    auto now = iso_ago(0);
+    std::string content = "# titan-workload-history v1\n";
+    for (int i = 0; i < 5; i++) {
+        content += "/usr/bin/steam" + std::to_string(i) + "|10|nvidia|" + now +
+                   "|nvidia:" + now + "\n";
+    }
+    auto p = write_history(content);
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 5u);
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::DGPU);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, StrongIntelWorkloadYieldsIGPU) {
+    auto now = iso_ago(0);
+    std::string content = "# titan-workload-history v1\n";
+    for (int i = 0; i < 5; i++) {
+        content += "/usr/bin/app" + std::to_string(i) + "|10|intel|" + now +
+                   "|intel:" + now + "\n";
+    }
+    auto p = write_history(content);
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::IGPU);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, BalancedWorkloadYieldsAuto) {
+    auto now = iso_ago(0);
+    std::string content = "# titan-workload-history v1\n";
+    for (int i = 0; i < 4; i++) {
+        std::string gpu = (i % 2 == 0) ? "nvidia" : "intel";
+        content += "/usr/bin/app" + std::to_string(i) + "|10|" + gpu + "|" + now +
+                   "|" + gpu + ":" + now + "\n";
+    }
+    auto p = write_history(content);
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::Auto);  // 40 vs 40, no 1.5x
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, StaleEntriesIgnored) {
+    auto old = iso_ago(3600);  // outside the 600s window
+    std::string content = "# titan-workload-history v1\n";
+    for (int i = 0; i < 5; i++) {
+        content += "/usr/bin/steam" + std::to_string(i) + "|10|nvidia|" + old +
+                   "|nvidia:" + old + "\n";
+    }
+    auto p = write_history(content);
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.analyze(), titan::GpuTarget::Auto);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, MalformedLinesAreSkipped) {
+    auto now = iso_ago(0);
+    auto p = write_history(
+        "# titan-workload-history v1\n"
+        "\n"
+        "garbage_no_pipes\n"
+        "still|bad\n"
+        "ok|not_a_number|intel|" + now + "|intel:" + now + "\n"
+        "/usr/bin/good|1|intel|" + now + "|intel:" + now + "\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 1u);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, ObservationsTrimmedTo100OnLoad) {
+    auto now = iso_ago(0);
+    std::string obs;
+    for (int i = 0; i < 150; i++) {
+        if (i) obs += ",";
+        obs += "intel:" + now;
+    }
+    auto p = write_history(
+        "# titan-workload-history v1\n"
+        "/usr/bin/big|150|intel|" + now + "|" + obs + "\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 1u);
+    EXPECT_NE(wa.analyze(), titan::GpuTarget::DGPU);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, ScanProcessesFindsUserProcessesAndSaves) {
+    auto p = fs::path("/tmp") / ("titan_test_scan_" + std::to_string(getpid()) + ".dat");
+    {
+        titan::WorkloadAnalyzer wa(p.string());
+        int tracked = wa.scan_processes();
+        EXPECT_GT(tracked, 0);
+        EXPECT_GT(wa.entry_count(), 0u);
+        // Atomic save: no .tmp residue after scan
+        EXPECT_FALSE(fs::exists(p.string() + ".tmp"));
+    }
+    // Round-trip: a fresh analyzer must reload what was saved
+    {
+        titan::WorkloadAnalyzer wa2(p.string());
+        EXPECT_GT(wa2.entry_count(), 0u);
+        EXPECT_NE(wa2.status_report().find("Workload decision"),
+                  std::string::npos);
+    }
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, ReloadPicksUpExternalChanges) {
+    auto p = write_history("# titan-workload-history v1\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    EXPECT_EQ(wa.entry_count(), 0u);
+
+    auto now = iso_ago(0);
+    write_history(
+        "# titan-workload-history v1\n"
+        "/usr/bin/late|1|intel|" + now + "|intel:" + now + "\n");
+    EXPECT_EQ(wa.entry_count(), 0u);  // not yet reloaded
+    wa.reload();
+    EXPECT_EQ(wa.entry_count(), 1u);
+    fs::remove(p);
+}
+
+TEST(WorkloadAnalyzerTest, StatusReportContainsFields) {
+    auto p = write_history("# titan-workload-history v1\n");
+    titan::WorkloadAnalyzer wa(p.string());
+    auto report = wa.status_report();
+    EXPECT_NE(report.find("Tracked apps"), std::string::npos);
+    EXPECT_NE(report.find("Workload decision"), std::string::npos);
+    EXPECT_NE(report.find("Time-of-day pred"), std::string::npos);
+    fs::remove(p);
 }

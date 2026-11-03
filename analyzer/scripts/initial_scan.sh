@@ -81,7 +81,17 @@ for package_name in "${packages[@]}"; do
     fi
 done
 
-grep -vE '^\s*($|#)' "${tmp_list}" | LC_ALL=C sort -u > "${HEAVY_LIST_FILE}"
+# Atomic write with flock (same pattern as update_heavy_list.sh)
+final_tmp="${HEAVY_LIST_FILE}.new"
+grep -vE '^\s*($|#)' "${tmp_list}" | LC_ALL=C sort -u > "${final_tmp}"
+if command -v flock >/dev/null 2>&1; then
+    (
+        flock -x 9
+        mv -f "${final_tmp}" "${HEAVY_LIST_FILE}"
+    ) 9>"${HEAVY_LIST_FILE}.lock"
+else
+    mv -f "${final_tmp}" "${HEAVY_LIST_FILE}"
+fi
 mark_first_run_complete
 
 scan_finished_at=$(date +%s)

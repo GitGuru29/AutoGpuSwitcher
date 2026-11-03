@@ -18,6 +18,8 @@ add_library(titan-core STATIC
     src/gpu_enforcer.cpp
     src/hyprland_ipc_bridge.cpp
     src/state_writer.cpp
+    src/workload_analyzer.cpp
+    src/cli.cpp
 )
 target_include_directories(titan-core PUBLIC include)
 target_compile_features(titan-core PUBLIC cxx_std_17)
@@ -43,6 +45,22 @@ install(FILES udev/99-nvidia-power.rules
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/udev/rules.d)
 install(PROGRAMS waybar/titan-gpu.sh
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/autogpuswitcher/waybar)
+add_executable(titan-gpu-tests
+    tests/test_all.cpp
+    src/config.cpp
+    src/gpu_detector.cpp
+    src/power_manager.cpp
+    src/workload_classifier.cpp
+    src/gpu_enforcer.cpp
+    src/hyprland_ipc_bridge.cpp
+    src/state_writer.cpp
+    src/workload_analyzer.cpp
+)
+
+target_include_directories(titan-gpu-tests PRIVATE include)
+target_compile_features(titan-gpu-tests PRIVATE cxx_std_17)
+target_compile_options(titan-gpu-tests PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(titan-gpu-tests PRIVATE GTest::gtest GTest::gtest_main)
 
 include(CTest)
 if(BUILD_TESTING)

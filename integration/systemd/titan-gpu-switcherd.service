@@ -1,0 +1,18 @@
+[Unit]
+Description=Titan GPU Switcher Daemon
+Documentation=https://github.com/GitGuru29/AutoGpuSwitcher
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/titan-gpu-switcherd
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=titan-gpu
+Environment=TITAN_SOCKET_PATH=/run/titan-gpu/daemon.sock
+Environment=TITAN_STATE_PATH=/run/titan-gpu/state.json
+Environment=TITAN_HISTORY_PATH=/var/lib/autogpuswitcher/workload_history.dat
+
+[Install]
+WantedBy=graphical-session.target

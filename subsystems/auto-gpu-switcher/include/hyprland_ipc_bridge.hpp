@@ -47,6 +47,7 @@ private:
     int reconnect_cooldown_ = 0;
     bool had_connection_ = false;
     std::string recv_buffer_;
+    std::string pending_;  // partial-line buffer across recv calls
     WindowCallback callback_;
     ReconnectCallback reconnect_cb_;
 };

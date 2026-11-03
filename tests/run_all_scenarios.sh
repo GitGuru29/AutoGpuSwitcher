@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# AutoGpuSwitcher - 55 Scenario Worst-Case & Edge-Case Test Suite Runner
+# AutoGpuSwitcher - Worst-Case & Edge-Case Scenario Test Suite Runner
 # ==============================================================================
 set -u
 
@@ -14,6 +14,7 @@ DAEMON_BIN="$BUILD_DIR/titan-gpu-switcherd"
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
+SKIPPED_TESTS=0
 
 # Colors
 GREEN='\033[0;32m'
@@ -37,6 +38,35 @@ fail() {
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
     FAILED_TESTS=$((FAILED_TESTS + 1))
     printf "  [${RED}FAIL${NC}] Case %02d: %s (%s)\n" "$num" "$name" "$reason"
+}
+
+skip() {
+    local num="$1"
+    local name="$2"
+    local reason="${3:-}"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    SKIPPED_TESTS=$((SKIPPED_TESTS + 1))
+    printf "  [${YELLOW}SKIP${NC}] Case %02d: %s (%s)\n" "$num" "$name" "$reason"
+}
+
+# Run an external test script: 0 = pass, 2 = skip, anything else = fail.
+run_external_test() {
+    local num="$1"
+    local name="$2"
+    shift 2
+
+    local output rc
+    output=$("$@" 2>&1)
+    rc=$?
+
+    case "$rc" in
+        0) pass "$num" "$name" ;;
+        2) skip "$num" "$name" "environment unavailable" ;;
+        *)
+            fail "$num" "$name" "exit $rc"
+            printf '%s\n' "$output" | sed 's/^/        /'
+            ;;
+    esac
 }
 
 info_header() {
@@ -186,16 +216,24 @@ fi
 QT_TEST=$(QT_QPA_PLATFORM="wayland;xcb" "$INTERCEPTOR_BIN" --dry-run /usr/bin/env 2>&1 || true)
 if grep -q "QT_QPA_PLATFORM=xcb" <<< "$QT_TEST"; then
     pass 14 "Qt Wayland+XCB fallback cleanly overridden to XCB"
+elif grep -qi "standard app detected" <<< "$QT_TEST"; then
+    # Non-heavy apps don't get Qt override applied — this is correct behavior
+    pass 14 "Qt override correctly skipped for non-heavy app (light path)"
 else
-    pass 14 "Qt Wayland fallback handling verified"
+    fail 14 "Qt Wayland/XCB fallback neither applied nor gracefully skipped"
 fi
 
 # Case 15: Missing heavy_apps.list fallback
-MISSING_LIST_OUT=$(AUTOGPUSWITCHER_HEAVY_LIST_FILE="/tmp/nonexistent_heavy_list_$$" "$INTERCEPTOR_BIN" --dry-run /usr/bin/ls 2>&1 || true)
-if [[ $? -eq 0 ]]; then
+AUTOGPUSWITCHER_HEAVY_LIST_FILE="/tmp/nonexistent_heavy_list_$$"
+MISSING_LIST_OUT=$("$INTERCEPTOR_BIN" --dry-run /usr/bin/ls 2>&1)
+MISSING_LIST_RC=$?
+unset AUTOGPUSWITCHER_HEAVY_LIST_FILE
+if [[ $MISSING_LIST_RC -eq 0 ]] && grep -qi "standard app detected\|heavy app detected" <<< "$MISSING_LIST_OUT"; then
     pass 15 "Missing heavy_apps.list safely falls back without crash"
+elif [[ $MISSING_LIST_RC -eq 0 ]]; then
+    pass 15 "Missing heavy_apps.list exits cleanly without crash"
 else
-    fail 15 "Launcher crashed on missing heavy_apps.list"
+    fail 15 "Launcher crashed on missing heavy_apps.list (rc=$MISSING_LIST_RC)"
 fi
 
 # Case 16: Nonexistent target binary execution
@@ -508,6 +546,134 @@ else
 fi
 
 # ==============================================================================
+# CATEGORY 8: End-to-End Pipeline (Install -> Analyze -> List -> Launch)
+# ==============================================================================
+info_header "Category 8: End-to-End Pipeline (Install -> Analyze -> List -> Launch)"
+
+E2E_DIR="/tmp/autogpu_e2e_$$"
+mkdir -p "$E2E_DIR"
+
+# Build a fake "heavy" ELF that links against libGL (simulates a GPU app)
+FAKE_HEAVY="$E2E_DIR/fake_game"
+if command -v gcc >/dev/null 2>&1; then
+    echo 'int main(){return 0;}' > "$E2E_DIR/fake.c"
+    gcc -o "$FAKE_HEAVY" "$E2E_DIR/fake.c" -lGL 2>/dev/null \
+        || gcc -o "$FAKE_HEAVY" "$E2E_DIR/fake.c" 2>/dev/null
+fi
+
+# Case 56: Analyzer records a heavy binary into heavy_apps.list
+E2E_LIST="$E2E_DIR/heavy_apps.list"
+touch "$E2E_LIST"
+if [[ -x "$FAKE_HEAVY" ]] && \
+   AUTOGPUSWITCHER_HEAVY_LIST_FILE="$E2E_LIST" \
+   bash "$ROOT_DIR/analyzer/scripts/analyze_binary.sh" --record "$FAKE_HEAVY" >/dev/null 2>&1 && \
+   [[ -s "$E2E_LIST" ]]; then
+    pass 56 "E2E: analyzer writes heavy record to heavy_apps.list"
+elif [[ -s "$E2E_LIST" ]]; then
+    pass 56 "E2E: heavy record present in heavy_apps.list"
+else
+    fail 56 "E2E: analyzer failed to record heavy binary" "list empty"
+fi
+
+# Case 57: Launcher dry-run on a heavy-listed app reports dGPU
+if [[ -x "$INTERCEPTOR_BIN" ]]; then
+    # Seed a record for the fake binary
+    echo "fake-pkg|fake_game|$FAKE_HEAVY" >> "$E2E_LIST"
+    LAUNCH_OUT=$(AUTOGPUSWITCHER_HEAVY_LIST_FILE="$E2E_LIST" \
+        "$INTERCEPTOR_BIN" --dry-run "$FAKE_HEAVY" 2>&1 || true)
+    if echo "$LAUNCH_OUT" | grep -qi "nvidia\|dGPU\|offload\|heavy"; then
+        pass 57 "E2E: launcher dry-run routes heavy app to dGPU"
+    else
+        fail 57 "E2E: launcher dry-run output missing dGPU decision" "$LAUNCH_OUT"
+    fi
+else
+    fail 57 "E2E: interceptor binary not built"
+fi
+
+# Case 58: Launcher dry-run on a non-heavy app reports iGPU/default
+if [[ -x "$INTERCEPTOR_BIN" ]]; then
+    LAUNCH_OUT=$(AUTOGPUSWITCHER_HEAVY_LIST_FILE="$E2E_LIST" \
+        "$INTERCEPTOR_BIN" --dry-run /usr/bin/env 2>&1 || true)
+    if echo "$LAUNCH_OUT" | grep -qi "iGPU\|standard\|default\|not heavy\|no heavy"; then
+        pass 58 "E2E: launcher dry-run routes non-heavy app to iGPU"
+    elif ! echo "$LAUNCH_OUT" | grep -qi "nvidia\|dGPU"; then
+        pass 58 "E2E: launcher dry-run routes non-heavy app to iGPU"
+    else
+        fail 58 "E2E: launcher misrouted non-heavy app to dGPU" "$LAUNCH_OUT"
+    fi
+else
+    fail 58 "E2E: interceptor binary not built"
+fi
+
+# Case 59: Post-transaction hook script sources cleanly and references analyzer
+if bash -n "$ROOT_DIR/pacman-hook/post_transaction.sh" 2>/dev/null && \
+   grep -q "analyze_package.sh" "$ROOT_DIR/pacman-hook/post_transaction.sh" && \
+   grep -q "generate_desktop_entries" "$ROOT_DIR/pacman-hook/post_transaction.sh"; then
+    pass 59 "E2E: pacman hook wired to analyzer + desktop rebuild"
+else
+    fail 59 "E2E: pacman hook missing analyzer or desktop rebuild step"
+fi
+
+# Case 60: Desktop generator runs without error against current list
+if bash "$ROOT_DIR/integration/desktop/generate_desktop_entries.sh" "$E2E_DIR/desktop" >/dev/null 2>&1; then
+    pass 60 "E2E: desktop integration generator runs cleanly"
+else
+    fail 60 "E2E: desktop generator errored"
+fi
+
+rm -rf "$E2E_DIR"
+
+# ==============================================================================
+# CATEGORY 9: Real Hardware & System Hook (Live Layer)
+# ==============================================================================
+info_header "Category 9: Real Hardware & System Hook (Live Layer)"
+
+# Case 61: Launcher env injection + actual dGPU render node use
+run_external_test 61 "Real launcher: PRIME env + dGPU render node" \
+    bash "$ROOT_DIR/tests/real_render_test.sh"
+
+# Case 62: pacman hook records a real package into an isolated heavy list
+run_external_test 62 "Real pacman hook: analyze package and record heavy app" \
+    bash "$ROOT_DIR/tests/pacman_hook_test.sh"
+
+# Case 63: Analyzer detects a graphics engine that dlopens its backend
+SUPERPOSITION_BIN="/opt/unigine-superposition/bin/superposition"
+if [[ -x "$SUPERPOSITION_BIN" ]]; then
+    ANALYZE_TMP=$(mktemp -d /tmp/titan-analyze-XXXXXX)
+    ANALYZE_OUT=$(AUTOGPUSWITCHER_CONFIG_FILE="$ANALYZE_TMP/no.conf" \
+        AUTOGPUSWITCHER_STATE_DIR="$ANALYZE_TMP/state" \
+        AUTOGPUSWITCHER_HEAVY_LIST_FILE="$ANALYZE_TMP/state/heavy.list" \
+        bash "$ROOT_DIR/analyzer/scripts/analyze_binary.sh" \
+        "$SUPERPOSITION_BIN" 2>&1 || true)
+    rm -rf "$ANALYZE_TMP"
+    if grep -q 'superposition' <<< "$ANALYZE_OUT"; then
+        pass 63 "Analyzer detects dlopen-only Unigine engine as heavy"
+    else
+        fail 63 "Analyzer missed dlopen-only Unigine engine" "$ANALYZE_OUT"
+    fi
+else
+    skip 63 "Analyzer detects dlopen-only Unigine engine" "Unigine not installed"
+fi
+
+# Case 64: Launcher finds the repo heavy list even when CWD is elsewhere
+REPO_HEAVY_LIST="$ROOT_DIR/state/heavy_apps.list"
+if [[ -f "$REPO_HEAVY_LIST" && ! -f /var/lib/autogpuswitcher/heavy_apps.list && -x "$INTERCEPTOR_BIN" ]]; then
+    TEST_HEAVY_PATH=$(awk -F'|' 'NF >= 3 && $3 ~ /^\// {print $3; exit}' "$REPO_HEAVY_LIST")
+    if [[ -n "$TEST_HEAVY_PATH" && -x "$TEST_HEAVY_PATH" ]]; then
+        CWD_OUT=$(cd /tmp && "$INTERCEPTOR_BIN" --dry-run "$TEST_HEAVY_PATH" 2>&1 || true)
+        if grep -qi 'heavy app detected' <<< "$CWD_OUT"; then
+            pass 64 "Launcher resolves repo heavy list from a different CWD"
+        else
+            fail 64 "Launcher lost repo heavy list outside repo root" "$CWD_OUT"
+        fi
+    else
+        skip 64 "Launcher resolves repo heavy list from a different CWD" "no runnable heavy record"
+    fi
+else
+    skip 64 "Launcher resolves repo heavy list from a different CWD" "repo list or interceptor unavailable"
+fi
+
+# ==============================================================================
 # Summary Report
 # ==============================================================================
 echo ""
@@ -516,12 +682,17 @@ echo -e "${YELLOW}                 TEST SUITE EXECUTION SUMMARY                 
 echo -e "${BLUE}======================================================================${NC}"
 echo "Total Scenarios Tested : $TOTAL_TESTS"
 echo -e "Passed Scenarios       : ${GREEN}$PASSED_TESTS${NC}"
+echo -e "Skipped Scenarios      : ${YELLOW}$SKIPPED_TESTS${NC}"
 if [[ $FAILED_TESTS -gt 0 ]]; then
     echo -e "Failed Scenarios       : ${RED}$FAILED_TESTS${NC}"
     exit 1
 else
     echo -e "Failed Scenarios       : ${GREEN}0${NC}"
     echo ""
-    echo -e "${GREEN}>>> ALL 55 SCENARIO TEST CASES PASSED SUCCESSFULLY! <<<${NC}"
+    if [[ $SKIPPED_TESTS -gt 0 ]]; then
+        echo -e "${GREEN}>>> ALL EXECUTED SCENARIOS PASSED ($SKIPPED_TESTS skipped) <<<${NC}"
+    else
+        echo -e "${GREEN}>>> ALL $TOTAL_TESTS SCENARIO TEST CASES PASSED SUCCESSFULLY! <<<${NC}"
+    fi
     exit 0
 fi

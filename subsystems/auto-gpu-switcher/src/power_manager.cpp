@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -16,11 +17,33 @@ bool PowerManager::init() {
         return true;
     }
 
+    const char* base_env = std::getenv("TITAN_POWER_SUPPLY_PATH");
+    const std::filesystem::path base = (base_env && *base_env)
+        ? std::filesystem::path(base_env)
+        : std::filesystem::path("/sys/class/power_supply");
+
+    // Preferred: find the mains supply by its type instead of assuming a
+    // well-known name. Laptops use AC, ACAD, ADP0, ADP1, AC0, ...
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(base, ec)) {
+        const auto type_path = entry.path() / "type";
+        const auto online_path = entry.path() / "online";
+
+        std::ifstream type_file(type_path);
+        std::string type;
+        if (!(type_file >> type) || type != "Mains") continue;
+        if (!std::filesystem::exists(online_path)) continue;
+
+        ac_path_ = online_path.string();
+        return true;
+    }
+
+    // Fallback for sysfs layouts that do not expose a type attribute.
     const std::vector<std::string> candidates = {
-        "/sys/class/power_supply/AC/online",
-        "/sys/class/power_supply/ACAD/online",
-        "/sys/class/power_supply/ADP1/online",
-        "/sys/class/power_supply/AC0/online"
+        (base / "AC" / "online").string(),
+        (base / "ACAD" / "online").string(),
+        (base / "ADP1" / "online").string(),
+        (base / "AC0" / "online").string(),
     };
 
     for (const auto& candidate : candidates) {
@@ -30,16 +53,19 @@ bool PowerManager::init() {
         }
     }
 
-    ac_path_ = "/sys/class/power_supply/AC/online";
+    ac_path_ = (base / "AC" / "online").string();
     return true;
 }
 
 PowerSource PowerManager::current_source() const {
     std::ifstream f(ac_path_);
     if (!f.is_open()) return PowerSource::Unknown;
-    int val = 0;
+
+    int val = -1;
     f >> val;
-    return val == 1 ? PowerSource::AC : PowerSource::Battery;
+    if (val == 1) return PowerSource::AC;
+    if (val == 0) return PowerSource::Battery;
+    return PowerSource::Unknown;
 }
 
 bool PowerManager::is_on_battery() const {

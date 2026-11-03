@@ -22,3 +22,10 @@ fi
     printf '[%s] analyzing %s package target(s)\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${#package_names[@]}"
     "${ANALYZE_PACKAGE_SCRIPT}" --record "${package_names[@]}"
 } >> "${LOG_FILE}" 2>&1
+
+# Phase 3: rebuild .desktop integration so new heavy apps get dGPU launchers
+DESKTOP_GEN="${PROJECT_ROOT}/integration/desktop/generate_desktop_entries.sh"
+if [[ -x "${DESKTOP_GEN}" ]]; then
+    printf '[%s] regenerating desktop integration\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "${LOG_FILE}"
+    "${DESKTOP_GEN}" >> "${LOG_FILE}" 2>&1 || true
+fi

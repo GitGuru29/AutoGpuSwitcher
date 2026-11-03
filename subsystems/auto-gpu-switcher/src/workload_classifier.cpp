@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <iostream>
 
+#include "debug_log.hpp"
+
 namespace titan {
 
 GpuTarget Classifier::classify(const std::string& wm_class) const {
@@ -12,10 +14,10 @@ GpuTarget Classifier::classify(const std::string& wm_class) const {
 GpuTarget Classifier::classify_with_power(GpuTarget rule_result, bool on_battery) const {
     if (rule_result == GpuTarget::Auto) {
         if (on_battery) {
-            std::cout << "[classifier] auto -> iGPU (battery)\n";
+            TITAN_DEBUG_LOG("[classifier] auto -> iGPU (battery)\n");
             return GpuTarget::IGPU;
         }
-        std::cout << "[classifier] auto -> dGPU (AC)\n";
+        TITAN_DEBUG_LOG("[classifier] auto -> dGPU (AC)\n");
         return GpuTarget::DGPU;
     }
     return rule_result;

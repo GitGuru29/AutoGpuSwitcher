@@ -112,6 +112,11 @@ bool HyprlandIpcBridge::poll(int timeout_ms) {
             if (was_connected && reconnect_cb_) {
                 reconnect_cb_();
             }
+        if (reconnect_cooldown_-- > 0) return false;
+        if (connect()) {
+            std::cout << "[hyprland_ipc] reconnected\n";
+            reconnect_cooldown_ = 0;
+            pending_.clear();
         } else {
             reconnect_cooldown_ = 10;
         }
@@ -134,6 +139,8 @@ bool HyprlandIpcBridge::poll(int timeout_ms) {
     }
     if (ret == 0) return false;
 
+    // Drain until EAGAIN (was: single 4KB read per poll, could miss events)
+    bool got_data = false;
     std::array<char, 4096> buf{};
     ssize_t n = recv(fd_, buf.data(), buf.size(), MSG_DONTWAIT);
     if (n == 0) {
@@ -158,6 +165,40 @@ void HyprlandIpcBridge::dispatch_lines() {
     while (true) {
         auto nl = recv_buffer_.find('\n', start);
         if (nl == std::string::npos) break;
+    while (true) {
+        ssize_t n = recv(fd_, buf.data(), buf.size() - 1, MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            // Real error — close and mark for reconnect
+            disconnect();
+            return false;
+        }
+        if (n == 0) {
+            // Peer closed (compositor restart) — mark for reconnect.
+            // Was: returned false while fd_ >= 0, so reconnect branch
+            // was never entered and window tracking died permanently.
+            std::cerr << "[hyprland_ipc] connection closed by peer\n";
+            disconnect();
+            return false;
+        }
+        got_data = true;
+        pending_.append(buf.data(), static_cast<size_t>(n));
+    }
+
+    if (!got_data) return false;
+
+    // Process complete lines; carry partial line to next poll
+    size_t pos = 0;
+    while (true) {
+        auto nl = pending_.find('\n', pos);
+        if (nl == std::string::npos) break;
+        auto event = pending_.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (!event.empty()) {
+            parse_event(event);
+        }
+    }
+    pending_.erase(0, pos);  // keep incomplete tail
 
         auto event = recv_buffer_.substr(start, nl - start);
         start = nl + 1;

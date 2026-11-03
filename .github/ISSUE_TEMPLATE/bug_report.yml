@@ -1,0 +1,63 @@
+name: Bug report
+description: Something broken in AutoGpuSwitcher
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill in as much as you can — GPU/driver
+        info is almost always required for graphics bugs.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Expected vs actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. sudo systemctl start titan-gpu-switcherd
+        2. titan-gpu set dgpu
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU model(s)
+      placeholder: "Intel Iris Xe + NVIDIA MX350"
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: NVIDIA driver version
+      placeholder: "nvidia-driver 565.xx"
+    validations:
+      required: true
+  - type: input
+    id: compositor
+    attributes:
+      label: Compositor / desktop
+      placeholder: "Hyprland (build version)"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Paste relevant output. For daemon issues:
+        `journalctl -u titan-gpu-switcherd --since -10m --no-pager`
+        For launcher issues: `/tmp/autogpuswitcher-launcher.log`
+      render: shell
+  - type: textarea
+    id: status
+    attributes:
+      label: Status output
+      description: Output of `titan-gpu status` (and `TITAN_DEBUG=1` if relevant)
+      render: shell

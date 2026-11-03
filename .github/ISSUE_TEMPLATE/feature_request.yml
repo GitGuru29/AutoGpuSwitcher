@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement to AutoGpuSwitcher
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What's painful or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should it work? Which component (analyzer, launcher, titan-gpu-switcherd, integration)?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: Arch Linux only
+          required: true
+        - label: Hyprland only (no GNOME/KDE/X11)
+          required: true
