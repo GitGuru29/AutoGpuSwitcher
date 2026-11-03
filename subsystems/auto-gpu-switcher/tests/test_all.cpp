@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -366,6 +369,30 @@ TEST_F(IpcParseTest, PartialEventFields) {
     EXPECT_TRUE(last_event_.title.empty());
 }
 
+TEST_F(IpcParseTest, EventSplitAcrossRecvBuffers) {
+    // Regression: a partial line must be buffered, not dropped.
+    ipc_.feed("activewindowv2>>0xabc,99,ste");
+    EXPECT_FALSE(event_received_);
+
+    ipc_.feed("am,Steam\n");
+    EXPECT_TRUE(event_received_);
+    EXPECT_EQ(last_event_.wm_class, "steam");
+    EXPECT_EQ(last_event_.title, "Steam");
+}
+
+TEST_F(IpcParseTest, MultipleEventsInSingleRecv) {
+    ipc_.feed("workspace>>1\nactivewindowv2>>0x1,100,kitty,term\n");
+    EXPECT_TRUE(event_received_);
+    EXPECT_EQ(last_event_.wm_class, "kitty");
+    EXPECT_EQ(last_event_.addr, "0x1");
+}
+
+TEST_F(IpcParseTest, TrailingCarriageReturnStripped) {
+    ipc_.feed("activewindowv2>>0x1,100,mpv,movie\r\n");
+    EXPECT_TRUE(event_received_);
+    EXPECT_EQ(last_event_.title, "movie");
+}
+
 // ═════════════════════════════════════════════
 // GPU DETECTOR TESTS (real sysfs)
 // ═════════════════════════════════════════════
@@ -594,6 +621,43 @@ TEST_F(StateWriterTest, JsonEscapesActiveApp) {
     EXPECT_NE(content.find("\\n"), std::string::npos);
 }
 
+TEST_F(StateWriterTest, JsonEscapesControlCharacters) {
+    titan::GpuDetector det;
+    det.scan();
+    titan::PowerManager pm;
+    pm.init();
+
+    titan::StateWriter sw;
+    sw.write(det, pm, titan::GpuTarget::Auto, std::string("a\rb\x08" "c\x0c" "d\x01"));
+
+    auto path = titan::StateWriter::state_path();
+    std::ifstream f(path);
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+
+    EXPECT_NE(content.find("\\r"), std::string::npos);
+    EXPECT_NE(content.find("\\b"), std::string::npos);
+    EXPECT_NE(content.find("\\f"), std::string::npos);
+    EXPECT_NE(content.find("\\u0001"), std::string::npos);
+}
+
+TEST_F(StateWriterTest, WriteIsAtomicAndLeavesNoTempFiles) {
+    titan::GpuDetector det;
+    det.scan();
+    titan::PowerManager pm;
+    pm.init();
+
+    titan::StateWriter sw;
+    sw.write(det, pm, titan::GpuTarget::Auto, "steam");
+
+    auto path = titan::StateWriter::state_path();
+    ASSERT_TRUE(fs::exists(path));
+
+    auto tmp = path;
+    tmp += ".tmp." + std::to_string(getpid());
+    EXPECT_FALSE(fs::exists(tmp));
+}
+
 // ═════════════════════════════════════════════
 // GPU ENFORCER TESTS
 // ═════════════════════════════════════════════
@@ -641,11 +705,16 @@ TEST_F(EnforcerTest, DGPUClientCounting) {
 }
 
 TEST_F(EnforcerTest, MultipleDGPUClients) {
+    // enforce_for_app() tracks the current app, so repeated calls for the same
+    // target must not inflate the dGPU client count.
     enforcer_->enforce_for_app("steam");
     EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
     enforcer_->enforce_for_app("steam");
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 1u);
+
     enforcer_->enforce_for_app("kitty");
-    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
     enforcer_->enforce_for_app("kitty");
     EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
 }
@@ -662,6 +731,63 @@ TEST_F(EnforcerTest, ManualOverrideDGPU) {
     EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
 }
 
+TEST_F(EnforcerTest, ManualOverrideDGPUIsIdempotent) {
+    enforcer_->enforce_target(titan::GpuTarget::DGPU);
+    enforcer_->enforce_target(titan::GpuTarget::DGPU);
+    enforcer_->enforce_target(titan::GpuTarget::DGPU);
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 1u);
+}
+
+TEST_F(EnforcerTest, ManualOverrideAutoReleasesHold) {
+    enforcer_->enforce_target(titan::GpuTarget::DGPU);
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+
+    // Regression: "set auto" used to leave the dGPU refcount pinned forever.
+    auto result = enforcer_->enforce_target(titan::GpuTarget::Auto);
+    EXPECT_EQ(result.target, titan::GpuTarget::Auto);
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+    EXPECT_FALSE(enforcer_->manual_override_active());
+}
+
+TEST_F(EnforcerTest, ManualOverrideIgpuReleasesAppHold) {
+    enforcer_->enforce_for_app("steam");
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+
+    enforcer_->enforce_target(titan::GpuTarget::IGPU);
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 0u);
+
+    // Releasing the override afterwards must not resurrect the stale app hold.
+    enforcer_->enforce_target(titan::GpuTarget::Auto);
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+}
+
+TEST_F(EnforcerTest, ManualOverridePreservesWindowTracking) {
+    enforcer_->enforce_for_app_window("steam", "0x200");
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+
+    enforcer_->enforce_target(titan::GpuTarget::DGPU);
+    enforcer_->enforce_target(titan::GpuTarget::Auto);
+
+    // The running dGPU window must survive an override round-trip.
+    EXPECT_TRUE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 1u);
+
+    enforcer_->remove_dgpu_window("0x200");
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+}
+
+TEST_F(EnforcerTest, ClearDgpuWindowsReleasesClients) {
+    enforcer_->enforce_for_app_window("steam", "0x300");
+    enforcer_->enforce_for_app_window("blender", "0x301");
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 2u);
+
+    // Regression: stale window addresses after a Hyprland restart must not
+    // pin the dGPU on forever.
+    enforcer_->clear_dgpu_windows();
+    EXPECT_FALSE(enforcer_->has_active_dgpu_clients());
+    EXPECT_EQ(enforcer_->active_dgpu_client_count(), 0u);
 TEST_F(EnforcerTest, IdempotentDGPUOverrideNoLeak) {
     // Regression: repeated `set dgpu` then one `set igpu` used to leave
     // the counter >0 forever, so idle_power_off() never fired.

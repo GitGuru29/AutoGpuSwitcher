@@ -20,6 +20,7 @@ struct WindowEvent {
 };
 
 using WindowCallback = std::function<void(const WindowEvent&)>;
+using ReconnectCallback = std::function<void()>;
 
 class HyprlandIpcBridge {
 public:
@@ -29,15 +30,26 @@ public:
 
     bool poll(int timeout_ms);
     void set_callback(WindowCallback cb) { callback_ = std::move(cb); }
+    void set_reconnect_callback(ReconnectCallback cb) { reconnect_cb_ = std::move(cb); }
     bool parse_event(const std::string& event);
+
+    // Feeds raw socket bytes through the line dispatcher; used by poll() and tests.
+    void feed(const std::string& data) {
+        recv_buffer_.append(data);
+        dispatch_lines();
+    }
 
 private:
     std::string find_socket_path();
+    void dispatch_lines();
 
     int fd_ = -1;
     int reconnect_cooldown_ = 0;
+    bool had_connection_ = false;
+    std::string recv_buffer_;
     std::string pending_;  // partial-line buffer across recv calls
     WindowCallback callback_;
+    ReconnectCallback reconnect_cb_;
 };
 
 }  // namespace titan
