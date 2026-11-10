@@ -12,7 +12,8 @@ Usage:
   analyze_package.sh [--record] [--verbose] package-name [...]
 
 Finds executable files owned by pacman packages and analyzes them for heavy
-graphics library usage.
+graphics library usage. Packages without game/GPU-workload desktop-category
+evidence are skipped unless their name is a known benchmark or game launcher.
 EOF
 }
 
@@ -59,6 +60,15 @@ for package_name in "$@"; do
     fi
 
     mapfile -t package_paths < <(pacman -Qlq "${package_name}" 2>/dev/null)
+
+    # Precision filter: a package that merely links libGL is not necessarily
+    # a game. Require game/benchmark/graphics/video category evidence (or a
+    # known benchmark/launcher package name). This keeps compositors, KDE/Qt
+    # utilities, file managers, and terminals out of the dGPU list.
+    if ! is_heavy_package "${package_name}" "${package_paths[@]}"; then
+        verbose_log "skipping package by category filter: ${package_name}"
+        continue
+    fi
 
     if ! printf '%s\n' "${package_paths[@]}" | grep -qE '^(/usr/bin/|/usr/sbin/|/opt/|/usr/lib/)'; then
         verbose_log "skipping package with no candidate roots: ${package_name}"
