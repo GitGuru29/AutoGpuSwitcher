@@ -17,7 +17,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Lint analyzer scripts
-        run: shellcheck -S warning analyzer/scripts/*.sh pacman-hook/post_transaction.sh setup/*.sh
+        run: shellcheck -S warning analyzer/scripts/*.sh pacman-hook/post_transaction.sh setup/*.sh tests/classifier_test.sh
 
       - name: Lint integration scripts
         run: shellcheck -S warning integration/shell/autogpu-run.sh integration/desktop/generate_desktop_entries.sh || true
@@ -83,6 +83,7 @@ jobs:
             "analyzer/scripts/analyze_package.sh"
             "analyzer/scripts/initial_scan.sh"
             "analyzer/config/heavy_libs.conf"
+            "analyzer/config/classifier.conf"
             "pacman-hook/hooks/autogpuswitcher.hook"
             "pacman-hook/post_transaction.sh"
             "setup/install_phase1.sh"
@@ -97,6 +98,7 @@ jobs:
             "integration/shell/bash_aliases.sh"
             "integration/desktop/generate_desktop_entries.sh"
             "tests/run_all_scenarios.sh"
+            "tests/classifier_test.sh"
             "tests/validate_steam.sh"
             "PKGBUILD"
           )

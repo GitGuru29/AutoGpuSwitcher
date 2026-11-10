@@ -1,6 +1,6 @@
 # Classification Mechanism — How Apps Are Assigned to GPUs
 
-AutoGpuSwitcher uses **two independent classification systems** that operate at different layers of the application lifecycle. One determines GPU assignment at install/launch time by inspecting binary library dependencies, and the other manages GPU power states at runtime based on window focus events from the Hyprland compositor.
+AutoGpuSwitcher uses **two independent classification systems** that operate at different layers of the application lifecycle. One determines GPU assignment at install/launch time from desktop-category evidence plus binary library dependencies, and the other manages GPU power states at runtime based on window focus events from the Hyprland compositor.
 
 ---
 
@@ -41,7 +41,14 @@ libvulkan.so
 libOpenCL.so
 ```
 
-This is the **sole source of truth** for what constitutes a "heavy" (GPU-demanding) application. If any ELF binary dynamically links against any of these shared libraries, it is classified as heavy and should run on the discrete GPU (dGPU).
+These patterns define **which linked libraries are GPU-heavy**. A package still has to pass the precision gate in §1.3 before its binaries are analyzed: simply linking a GPU library is not enough, because desktop compositors, KDE/Qt utilities, terminals, and file managers also link GL.
+
+The companion file `analyzer/config/classifier.conf` defines that gate:
+
+- `HEAVY_CATEGORIES` — desktop entry categories that indicate a GPU workload
+- `EXCLUDED_CATEGORIES` — categories that mark a utility even if it links GL
+- `BENCHMARK_PACKAGES` / `GAME_LAUNCHER_PACKAGES` — package-name allowlists
+- `EXCLUDED_PACKAGES` — compositors and desktop components that must never be auto-routed
 
 The libraries cover the major GPU APIs:
 
@@ -101,7 +108,38 @@ is_candidate_package() {
 
 Packages ending in `-headers` (kernel/dev headers) and starting with `lib32-` (32-bit compatibility libraries) are excluded since they don't contain launchable applications.
 
-#### Stage 2: Path Filtering (`path_is_candidate_root`)
+#### Stage 2: Category / Known-App Filtering (`is_heavy_package`)
+
+A package is analyzed only when one of these is true:
+
+1. Its name matches a benchmark or game-launcher pattern (`gputest`, `unigine-*`,
+   `steam`, `lutris`, `dolphin-emu`, …).
+2. One of its `.desktop` files advertises a strong GPU category such as `Game`,
+   `Benchmark`, `Graphics`, `3DGraphics`, or a video-capable `AudioVideo` entry.
+
+Packages whose names match `EXCLUDED_PACKAGES` (for example `hyprland`,
+`xwayland`, `dolphin`, `pavucontrol-qt`) and desktop entries that are utilities,
+viewers, terminals, file managers, development tools, or music-only players are
+rejected. This is what keeps desktop components out of the dGPU list.
+
+```bash
+is_heavy_package() {
+    local package_name="${1:-}"
+    # ... known exclusions, then benchmark/launcher allowlists ...
+    for path in "${paths[@]}"; do
+        [[ "${path}" == *.desktop ]] || continue
+        desktop_file_is_heavy "${path}" && return 0
+    done
+    return 1
+}
+```
+
+The rules live in `analyzer/config/classifier.conf`; distributions and users can
+override the file with `AUTOGPUSWITCHER_CLASSIFIER_FILE`. Apps that have no
+desktop entry (or are installed outside pacman) can be pinned in
+`state/manual_heavy_apps.list`.
+
+#### Stage 3: Path Filtering (`path_is_candidate_root`)
 
 ```bash
 path_is_candidate_root() {
@@ -116,11 +154,11 @@ path_is_candidate_root() {
 
 Only files under these directories are examined — the standard locations for executable binaries on Arch Linux.
 
-#### Stage 3: File Type Filtering (`is_elf_executable` + `should_scan_path`)
+#### Stage 4: File Type Filtering (`is_elf_executable` + `should_scan_path`)
 
 The file must:
 1. Exist and be executable (`-f` and `-x`)
-2. Pass `path_is_candidate_root` (Stage 2)
+2. Pass `path_is_candidate_root` (Stage 3)
 3. Not be a debug file (`*.debug`, `/usr/lib/debug/*`)
 4. Not be a shared library (`*.so`, `*.so.*`)
 5. Not be a header or share file (`/usr/include/*`, `/usr/share/*`)
@@ -198,7 +236,13 @@ format_heavy_app_record() {
 
 Records are merged into `state/heavy_apps.list` via `update_heavy_list.sh`, which **deduplicates** and **sorts** the entries. This file is the persistent database that the launcher reads at runtime.
 
-**Current database size:** 191 entries (as of initial scan).
+`initial_scan.sh --force` rebuilds `heavy_apps.list` from scratch and then
+appends `state/manual_heavy_apps.list`, so user-pinned entries survive a rescan.
+After upgrading from an older version, run a forced scan once to drop stale
+entries that the precision classifier no longer accepts.
+
+**Current database size:** varies by installed packages; the bundled development
+snapshot is not authoritative.
 
 ### 1.6 Launch-Time Interceptor
 
@@ -790,12 +834,15 @@ Application Launched
 | File | Role |
 |------|------|
 | `analyzer/config/heavy_libs.conf` | Rule database for library-based classification |
-| `analyzer/scripts/common.sh` | Shared shell functions: ELF detection, path filtering, record formatting |
+| `analyzer/config/classifier.conf` | Package/desktop-category precision rules |
+| `analyzer/scripts/common.sh` | Shared shell functions: ELF detection, path filtering, category classification, record formatting |
 | `analyzer/scripts/analyze_binary.sh` | Core classifier: runs ldd, checks for heavy library linkage |
 | `analyzer/scripts/analyze_package.sh` | Package-level analyzer: finds executables in pacman packages |
 | `analyzer/scripts/initial_scan.sh` | Full system scan, rebuilds heavy_apps.list from scratch |
 | `analyzer/scripts/update_heavy_list.sh` | Deduplicates and merges records into heavy_apps.list |
-| `state/heavy_apps.list` | Persisted classification database (191 entries) |
+| `state/heavy_apps.list` | Persisted classification database |
+| `state/manual_heavy_apps.list` | User-pinned entries merged into every rebuild |
+| `tests/classifier_test.sh` | Regression tests for category/package precision |
 | `pacman-hook/hooks/autogpuswitcher.hook` | libalpm hook: triggers on Install/Upgrade |
 | `pacman-hook/post_transaction.sh` | Reads package names from stdin, runs analysis |
 | `interceptor/src/main.cpp` | Launch-time interceptor: checks heavy list, applies env vars |
@@ -820,6 +867,8 @@ Application Launched
 | `AUTOGPUSWITCHER_STATE_DIR` | `state/` | Analyzer scripts | State directory location |
 | `AUTOGPUSWITCHER_CONFIG_FILE` | `/etc/autogpuswitcher/autogpuswitcher.conf` | Analyzer scripts | Configuration file |
 | `AUTOGPUSWITCHER_HEAVY_LIBS_FILE` | `analyzer/config/heavy_libs.conf` | Analyzer scripts | Heavy library patterns file |
+| `AUTOGPUSWITCHER_CLASSIFIER_FILE` | `analyzer/config/classifier.conf` | Analyzer scripts | Category/package precision rules |
+| `AUTOGPUSWITCHER_MANUAL_HEAVY_LIST_FILE` | `state/manual_heavy_apps.list` | Analyzer scripts | User-pinned heavy apps preserved across scans |
 | `AUTOGPUSWITCHER_VERBOSE` | `0` | Analyzer scripts | Enable verbose logging |
 | `TITAN_CONFIG_PATH` | `/etc/titan-gpu/config` | Daemon | Daemon config file path |
 | `TITAN_DRM_PATH` | `/sys/class/drm` | GPU Detector | Override DRM sysfs path |

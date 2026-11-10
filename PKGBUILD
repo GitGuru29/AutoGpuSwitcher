@@ -68,6 +68,8 @@ package() {
     done
     install -Dm644 analyzer/config/heavy_libs.conf \
         "$pkgdir/usr/lib/autogpuswitcher/analyzer/config/heavy_libs.conf"
+    install -Dm644 analyzer/config/classifier.conf \
+        "$pkgdir/usr/lib/autogpuswitcher/analyzer/config/classifier.conf"
 
     # --- Pacman hook (nested path matching .hook Exec= line) ---
     install -Dm644 pacman-hook/hooks/autogpuswitcher.hook \

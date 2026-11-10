@@ -27,6 +27,7 @@ install -m 0755 "${PROJECT_ROOT}/analyzer/scripts/analyze_binary.sh" "${INSTALL_
 install -m 0755 "${PROJECT_ROOT}/analyzer/scripts/analyze_package.sh" "${INSTALL_ROOT}/analyzer/scripts/analyze_package.sh"
 install -m 0755 "${PROJECT_ROOT}/analyzer/scripts/initial_scan.sh" "${INSTALL_ROOT}/analyzer/scripts/initial_scan.sh"
 install -m 0644 "${PROJECT_ROOT}/analyzer/config/heavy_libs.conf" "${INSTALL_ROOT}/analyzer/config/heavy_libs.conf"
+install -m 0644 "${PROJECT_ROOT}/analyzer/config/classifier.conf" "${INSTALL_ROOT}/analyzer/config/classifier.conf"
 
 # --- Install interceptor launcher (Phase 2) ---
 LAUNCHER_BIN="${PROJECT_ROOT}/interceptor/build/autogpuswitcher-launcher"
@@ -71,13 +72,16 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
     cat > "${CONFIG_FILE}" <<EOF
 AUTOGPUSWITCHER_STATE_DIR=${STATE_DIR}
 AUTOGPUSWITCHER_HEAVY_LIST_FILE=${STATE_DIR}/heavy_apps.list
+AUTOGPUSWITCHER_MANUAL_HEAVY_LIST_FILE=${STATE_DIR}/manual_heavy_apps.list
 AUTOGPUSWITCHER_FIRST_RUN_MARKER=${STATE_DIR}/first_run_complete
 AUTOGPUSWITCHER_HEAVY_LIBS_FILE=${INSTALL_ROOT}/analyzer/config/heavy_libs.conf
+AUTOGPUSWITCHER_CLASSIFIER_FILE=${INSTALL_ROOT}/analyzer/config/classifier.conf
 AUTOGPUSWITCHER_LOG_FILE=${STATE_DIR}/logs/launcher.log
 EOF
 fi
 
 touch "${STATE_DIR}/heavy_apps.list"
+touch "${STATE_DIR}/manual_heavy_apps.list"
 
 echo ""
 echo "Phase 1+2+3 assets installed."

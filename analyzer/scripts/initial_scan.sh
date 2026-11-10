@@ -12,7 +12,8 @@ Usage:
   initial_scan.sh [--force] [--verbose]
 
 Scans currently installed pacman packages, classifies heavy applications, and
-rebuilds state/heavy_apps.list from scratch.
+rebuilds state/heavy_apps.list from scratch. Entries in
+state/manual_heavy_apps.list are preserved and merged into the rebuilt list.
 EOF
 }
 
@@ -80,6 +81,12 @@ for package_name in "${packages[@]}"; do
             "${SCRIPT_DIR}/analyze_package.sh" "${package_name}" >> "${tmp_list}" || true
     fi
 done
+
+# Manual entries survive a forced rebuild. Users can put games/benchmarks that
+# have no desktop entry (or are installed outside pacman) here.
+if [[ -s "${MANUAL_HEAVY_LIST_FILE}" ]]; then
+    cat "${MANUAL_HEAVY_LIST_FILE}" >> "${tmp_list}"
+fi
 
 # Atomic write with flock (same pattern as update_heavy_list.sh)
 final_tmp="${HEAVY_LIST_FILE}.new"

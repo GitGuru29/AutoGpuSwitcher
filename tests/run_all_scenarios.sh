@@ -674,6 +674,15 @@ else
 fi
 
 # ==============================================================================
+# CATEGORY 10: Classifier Precision (Package / Desktop Category Layer)
+# ==============================================================================
+info_header "Category 10: Classifier Precision (Package / Desktop Category Layer)"
+
+# Case 65: Desktop-category and known-package classification
+run_external_test 65 "Classifier: game/benchmark/utility precision rules" \
+    bash "$ROOT_DIR/tests/classifier_test.sh"
+
+# ==============================================================================
 # Summary Report
 # ==============================================================================
 echo ""

@@ -48,8 +48,12 @@ battery life without manual intervention.
 ### Phase 1: Detection Pipeline (Bash)
 - **pacman hook** — triggers on every package install/upgrade
 - **ELF analyzer** — `ldd` + library matching against `heavy_libs.conf`
+- **Precision classifier** — desktop-category evidence plus benchmark/launcher
+  allowlists from `classifier.conf`, so compositors and KDE/Qt utilities that
+  merely link libGL are not treated as games
 - **First-run scan** — scans all pre-installed packages
-- **Persistent state** — `state/heavy_apps.list` (`pkg|app|/path`)
+- **Persistent state** — `state/heavy_apps.list` (`pkg|app|/path`);
+  `state/manual_heavy_apps.list` survives rescans for apps without desktop files
 
 ### Phase 2: Launch Interceptor (C++17)
 - **`autogpuswitcher-launcher`** — wraps app execution
@@ -125,13 +129,21 @@ titan-gpu status
 | `/etc/autogpuswitcher/autogpuswitcher.conf` | Analyzer paths and state |
 | `/etc/titan-gpu/config` | Titan daemon rules (INI) |
 | `analyzer/config/heavy_libs.conf` | GPU library patterns |
+| `analyzer/config/classifier.conf` | Desktop category / benchmark / launcher rules |
 | `state/heavy_apps.list` | Detected heavy apps |
+| `state/manual_heavy_apps.list` | User-pinned heavy apps, preserved by rescans |
+
+To re-classify existing packages after upgrading (and drop stale entries such as
+desktop components), rerun the scan with `sudo ./setup/first_run.sh --force`.
 
 ## Testing
 
 ```bash
-# Full test suite (60 scenarios)
+# Full test suite (65 scenarios)
 bash tests/run_all_scenarios.sh
+
+# Classifier precision rules (24 checks)
+bash tests/classifier_test.sh
 
 # GTest unit tests (80 tests)
 ./build/titan-gpu-tests
